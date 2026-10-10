@@ -1,0 +1,10 @@
+node_modules/
+coverage/
+dist/
+.pi/
+.env
+.env.*
+*.log
+*.tsbuildinfo
+.DS_Store
+LEASE-VERIFICATION.md

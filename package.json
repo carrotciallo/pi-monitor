@@ -1,0 +1,35 @@
+{
+  "name": "pi-monitor",
+  "version": "1.0.0",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/carrotciallo/pi-monitor.git" },
+  "homepage": "https://github.com/carrotciallo/pi-monitor#readme",
+  "bugs": { "url": "https://github.com/carrotciallo/pi-monitor/issues" },
+  "engines": { "node": ">=22.19.0" },
+  "files": ["src", "docs", "README.md", "README.zh-CN.md", "LICENSE"],
+  "type": "module",
+  "description": "Nonblocking read-only background monitoring for Pi Coding Agent",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "re2js": "^2.8.6"
+  }
+}
