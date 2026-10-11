@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@eare
 import { registerMonitorCommands } from "./commands.ts";
 import { MonitorScheduler, type ToolExecutionOptions } from "./scheduler.ts";
 import { registerMonitorTools } from "./tools.ts";
+import { classifyShutdownReason } from "./lifecycle.ts";
 import { NOTIFICATION_CUSTOM_TYPE } from "./types.ts";
 
 export const MONITOR_GUIDELINE =
@@ -80,18 +81,71 @@ export default function piMonitor(pi: ExtensionAPI) {
     });
   }
 
+  /**
+   * Reconcile durable descriptors from the active branch only. Running
+   * descriptors that no live monitor backs were lost (for example on reload);
+   * report them without restoring execution. Persisted interrupted descriptors
+   * are surfaced as a resume notice. Neither path wakes a turn.
+   *
+   * When there is a UI the notices are shown immediately. Without a UI a
+   * concise non-turn-waking `nextTurn` context notice is delivered so a headless
+   * agent is not left unaware.
+   */
+  function deliverHeadlessNotice(content: string | undefined): void {
+    if (!content || !pi || typeof pi.sendMessage !== "function") return;
+    try {
+      pi.sendMessage(
+        {
+          customType: NOTIFICATION_CUSTOM_TYPE,
+          content,
+          display: true,
+          details: { kind: "lifecycle-notice" },
+        },
+        { deliverAs: "nextTurn" }
+      );
+    } catch {
+      // Delivery is best effort; the persisted descriptor remains for review.
+    }
+  }
+
+  function reconcileAndNotify(sessionId: string, ctx: ExtensionContext) {
+    const branchFn = ctx.sessionManager.getBranch;
+    const branch = typeof branchFn === "function" ? branchFn.call(ctx.sessionManager) : [];
+    const { lost, interrupted } = scheduler.reconcilePersisted(sessionId, branch);
+    scheduler.registerUIContext(sessionId, ctx);
+
+    const lostNotice = scheduler.notifyLost(sessionId, lost);
+    const interruptNotice = scheduler.notifyInterruptions(sessionId);
+
+    if (!ctx.hasUI) {
+      deliverHeadlessNotice(scheduler.buildLifecycleNotice(lost, interruptNotice));
+    }
+  }
+
   // Lifecycle listeners
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
     disableWaitPolicy();
     const sessionId = ctx.sessionManager.getSessionId();
     scheduler.registerUIContext(sessionId, ctx);
+    reconcileAndNotify(sessionId, ctx);
     scheduler.updateUI(sessionId);
   });
 
+  // Branch navigation: interrupt on the old branch before the leaf moves so the
+  // persisted descriptors land on the branch being left.
+  pi.on("session_before_tree", (_event, ctx: ExtensionContext) => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    scheduler.interruptSession(sessionId, "interrupted by branch switch");
+  });
+
+  // After navigation, register the (new) context and surface a resume notice.
+  // The old branch is no longer visible through getBranch(), so this only uses
+  // in-memory state for the current runtime.
   pi.on("session_tree", (_event, ctx: ExtensionContext) => {
     const sessionId = ctx.sessionManager.getSessionId();
     scheduler.registerUIContext(sessionId, ctx);
-    scheduler.cancelSession(sessionId, "Monitoring cancelled on branch switch");
+    const notice = scheduler.notifyInterruptions(sessionId, "a branch switch");
+    if (!ctx.hasUI) deliverHeadlessNotice(notice);
     scheduler.updateUI(sessionId);
   });
 
@@ -103,14 +157,18 @@ export default function piMonitor(pi: ExtensionAPI) {
     scheduler.registerUIContext(sessionId, ctx);
   });
 
-  pi.on("session_shutdown", (_event, ctx: ExtensionContext) => {
+  // Session switch/reload/shutdown interrupt monitors. Interruptions never send
+  // a followUp, so no notification can wake the wrong branch or session.
+  pi.on("session_before_switch", (event, ctx: ExtensionContext) => {
     const sessionId = ctx.sessionManager.getSessionId();
-    scheduler.pruneSession(sessionId);
+    scheduler.interruptSession(sessionId, `interrupted before session switch (${event.reason})`);
   });
 
-  pi.on("session_before_switch", (_event, ctx: ExtensionContext) => {
+  pi.on("session_shutdown", (event, ctx: ExtensionContext) => {
     const sessionId = ctx.sessionManager.getSessionId();
-    scheduler.cancelSession(sessionId, "Monitoring cancelled on session switch");
+    const label = classifyShutdownReason(event.reason);
+    scheduler.interruptSession(sessionId, label);
+    scheduler.pruneSession(sessionId);
   });
 
   pi.on("before_agent_start", (event) => {

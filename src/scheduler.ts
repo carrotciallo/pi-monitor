@@ -1,19 +1,28 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { formatCompletionNotification, formatWidgetLines } from "./formatter.ts";
-import { matchesCondition } from "./matcher.ts";
+import { formatCompletionNotification, formatInterruptionNotice, formatWidgetLines } from "./formatter.ts";
+import { formatLostMonitorNotice } from "./lifecycle.ts";
+import { canonicalJson, matchesCondition, observeConditionValue } from "./matcher.ts";
 import {
+  DEFAULT_CONSECUTIVE_MATCHES,
   DEFAULT_INTERVAL_SECONDS,
   DEFAULT_MAX_RETRIES,
+  DEFAULT_STABLE_FOR_SECONDS,
   DEFAULT_TIMEOUT_SECONDS,
+  MAX_CONSECUTIVE_MATCHES,
   MAX_CONCURRENT_MONITORS,
   MAX_CONTENT_LENGTH,
   MAX_INTERVAL_SECONDS,
+  MAX_STABLE_FOR_SECONDS,
   MAX_STORED_RECORDS_PER_SESSION,
   MAX_TIMEOUT_SECONDS,
   MIN_INTERVAL_SECONDS,
+  STATE_ENTRY_TYPE,
+  type CancelKind,
   type MonitorCondition,
   type MonitorOptions,
+  type MonitorPersistEntry,
   type MonitorRecord,
+  type MonitorStatus,
   NOTIFICATION_CUSTOM_TYPE,
   WIDGET_KEY,
 } from "./types.ts";
@@ -37,6 +46,11 @@ export interface ToolExecutor {
   }>;
 }
 
+export interface StartResult {
+  record: MonitorRecord;
+  reused: boolean;
+}
+
 export class MonitorScheduler {
   private records = new Map<string, MonitorRecord>();
   private sessionMonitors = new Map<string, Set<string>>();
@@ -49,6 +63,12 @@ export class MonitorScheduler {
   private uiContexts = new Map<string, ExtensionContext>();
   private toolContexts = new Map<string, ExtensionContext>();
   private clearWidgetTimers = new Map<string, NodeJS.Timeout>();
+  /** In-memory index of persisted monitor lifecycle records, per session. */
+  private persisted = new Map<string, Map<string, MonitorPersistEntry>>();
+  /** Monitor ids already surfaced as interrupted for the current session. */
+  private interruptionNotified = new Set<string>();
+  /** Monitor ids already surfaced as lost (running with no live record). */
+  private lostNotified = new Set<string>();
 
   constructor(toolExecutor: ToolExecutor, pi?: ExtensionAPI) {
     this.toolExecutor = toolExecutor;
@@ -105,6 +125,138 @@ export class MonitorScheduler {
     }
   }
 
+  /**
+   * Persist a durable, non-context lifecycle record for the active branch. The
+   * record never contains raw tool arguments or results. Best effort: missing
+   * host support is ignored, since in-memory state remains authoritative.
+   */
+  private persist(record: MonitorRecord, event: MonitorPersistEntry["event"], reason?: string): void {
+    const entry: MonitorPersistEntry = {
+      version: 1,
+      monitorId: record.id,
+      event,
+      tool: record.tool,
+      argsHash: safeArgsHash(record.args),
+      condition: record.condition,
+      options: record.options,
+      status: record.status,
+      createdAt: record.createdAt,
+      terminalAt: record.completedAt,
+      reason,
+      attempts: record.attempts,
+      interruptedBy: record.interruptedBy,
+    };
+    const sessionMap = this.persisted.get(record.sessionId) ?? new Map<string, MonitorPersistEntry>();
+    sessionMap.set(record.id, entry);
+    this.persisted.set(record.sessionId, sessionMap);
+    if (this.pi && typeof this.pi.appendEntry === "function") {
+      try {
+        this.pi.appendEntry(STATE_ENTRY_TYPE, entry);
+      } catch {
+        // Persistence is best effort; never fail a monitor because of it.
+      }
+    }
+  }
+
+  /**
+   * Reconstruct known monitor lifecycle from the active branch only. Returns
+   * descriptors that were started but never reached a terminal state (lost on
+   * reload) and descriptors that were interrupted. No execution is restored.
+   * Deduplicates a monitor's entries by keeping its latest terminal/created time.
+   */
+  public reconcilePersisted(
+    sessionId: string,
+    entries: readonly unknown[]
+  ): { lost: MonitorPersistEntry[]; interrupted: MonitorPersistEntry[] } {
+    const latest = new Map<string, MonitorPersistEntry>();
+    for (const raw of entries) {
+      const entry = raw as { type?: string; customType?: string; data?: unknown };
+      if (entry?.type !== "custom" || entry.customType !== STATE_ENTRY_TYPE) continue;
+      const data = entry.data as MonitorPersistEntry | undefined;
+      if (!data || data.version !== 1 || typeof data.monitorId !== "string") continue;
+      const previous = latest.get(data.monitorId);
+      if (!previous || (data.terminalAt ?? data.createdAt) >= (previous.terminalAt ?? previous.createdAt)) {
+        latest.set(data.monitorId, data);
+      }
+    }
+    this.persisted.set(sessionId, latest);
+
+    const live = new Set(this.getSessionRecords(sessionId).map(r => r.id));
+    const lost: MonitorPersistEntry[] = [];
+    const interrupted: MonitorPersistEntry[] = [];
+    for (const data of latest.values()) {
+      // A descriptor backed by a live in-memory record is not a reload artifact.
+      if (live.has(data.monitorId)) {
+        continue;
+      }
+      if (data.status === "running") lost.push(data);
+      else if (data.status === "interrupted") interrupted.push(data);
+    }
+    return { lost, interrupted };
+  }
+
+  /**
+   * Claim lost descriptors that have not been reported yet in this runtime and
+   * surface them in the UI. Returns the notice text for non-UI delivery.
+   * Missing host persistence degrades to an empty list.
+   */
+  public notifyLost(sessionId: string, lost: readonly MonitorPersistEntry[]): string | undefined {
+    const fresh = lost.filter(e => !this.lostNotified.has(e.monitorId));
+    for (const e of fresh) this.lostNotified.add(e.monitorId);
+    if (fresh.length === 0) return undefined;
+    const notice = formatLostMonitorNotice(fresh);
+    const ctx = this.uiContexts.get(sessionId);
+    if (notice && ctx?.hasUI) {
+      ctx.ui.notify(notice, "warning");
+    }
+    return notice;
+  }
+
+  /**
+   * Surface a resume notice for monitors interrupted during this session or in
+   * the active branch. Covers both live interrupted records (runtime) and
+   * persisted interrupted descriptors (reload), so an interruption never
+   * disappears silently. Returns the notice text for non-UI delivery.
+   */
+  public notifyInterruptions(sessionId: string, reason = "a session or branch change"): string | undefined {
+    const notices: string[] = [];
+
+    const live = this.getSessionRecords(sessionId).filter(
+      r => r.status === "interrupted" && !this.interruptionNotified.has(r.id)
+    );
+    for (const r of live) this.interruptionNotified.add(r.id);
+    if (live.length > 0) {
+      const notice = formatInterruptionNotice(live.map(r => ({
+        id: r.id,
+        options: { description: r.options.description },
+      })));
+      if (notice) notices.push(notice);
+    }
+
+    const persisted = this.persisted.get(sessionId);
+    if (persisted) {
+      const stale = Array.from(persisted.values()).filter(
+        e => e.status === "interrupted" && !this.interruptionNotified.has(e.monitorId)
+      );
+      for (const e of stale) this.interruptionNotified.add(e.monitorId);
+      if (stale.length > 0) {
+        const notice = formatInterruptionNotice(stale.map(e => ({
+          id: e.monitorId,
+          options: { description: e.options?.description },
+        })));
+        if (notice) notices.push(notice);
+      }
+    }
+
+    if (notices.length === 0) return undefined;
+    const combined = notices.join("\n");
+    const ctx = this.uiContexts.get(sessionId);
+    if (ctx?.hasUI) {
+      ctx.ui.notify(combined, "warning");
+    }
+    return combined;
+  }
+
   public startMonitor(
     sessionId: string,
     tool: string,
@@ -113,27 +265,73 @@ export class MonitorScheduler {
     options: MonitorOptions = {},
     ctx?: ExtensionContext
   ): MonitorRecord {
+    return this.startOrReuseMonitor(sessionId, tool, args, condition, options, ctx).record;
+  }
+
+  /**
+   * Start a monitor, or reuse an existing identical running monitor in the same
+   * session. Identity uses the tool name, canonical JSON arguments, canonical
+   * condition and the full polling/stability configuration. `description` is a
+   * label and does not affect identity.
+   */
+  public startOrReuseMonitor(
+    sessionId: string,
+    tool: string,
+    args: Record<string, unknown>,
+    condition: MonitorCondition,
+    options: MonitorOptions = {},
+    ctx?: ExtensionContext
+  ): StartResult {
     if (ctx) {
       this.registerContext(sessionId, ctx);
     }
 
+    const intervalSec = clamp(options.intervalSeconds ?? DEFAULT_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS);
+    const timeoutSec = clamp(options.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS, MIN_INTERVAL_SECONDS * 2, MAX_TIMEOUT_SECONDS);
+    const maxRetries = Math.max(0, Math.min(10, options.maxRetries ?? DEFAULT_MAX_RETRIES));
+    const consecutiveMatches = clamp(
+      options.consecutiveMatches ?? DEFAULT_CONSECUTIVE_MATCHES, 1, MAX_CONSECUTIVE_MATCHES
+    );
+    const stableForSeconds = clamp(
+      options.stableForSeconds ?? DEFAULT_STABLE_FOR_SECONDS, 0, MAX_STABLE_FOR_SECONDS
+    );
+
+    let identity: string;
+    try {
+      identity = canonicalJson({ tool, args, condition, intervalSec, timeoutSec, maxRetries, consecutiveMatches, stableForSeconds });
+    } catch (err) {
+      throw new Error(`Cannot start monitor: arguments are not canonical JSON (${err instanceof Error ? err.message : String(err)})`);
+    }
+
+    // Exact dedupe: reuse an existing running monitor with identical identity.
+    for (const existing of this.getSessionRecords(sessionId)) {
+      if (existing.status !== "running") continue;
+      let existingIdentity: string | null = null;
+      try {
+        existingIdentity = canonicalJson({
+          tool: existing.tool,
+          args: existing.args,
+          condition: existing.condition,
+          intervalSec: existing.options.intervalSeconds,
+          timeoutSec: existing.options.timeoutSeconds,
+          maxRetries: existing.options.maxRetries,
+          consecutiveMatches: existing.options.consecutiveMatches,
+          stableForSeconds: existing.options.stableForSeconds,
+        });
+      } catch {
+        existingIdentity = null;
+      }
+      if (existingIdentity === identity) {
+        return { record: existing, reused: true };
+      }
+    }
+
     // Check concurrency limit for running monitors in this session
-    const existing = this.getSessionRecords(sessionId);
-    const runningCount = existing.filter(r => r.status === "running").length;
+    const existingRecords = this.getSessionRecords(sessionId);
+    const runningCount = existingRecords.filter(r => r.status === "running").length;
     if (runningCount >= MAX_CONCURRENT_MONITORS) {
       throw new Error(`Exceeded maximum concurrent monitors limit (${MAX_CONCURRENT_MONITORS}) for session ${sessionId}`);
     }
-
-    // Bounds normalization
-    const intervalSec = Math.max(
-      MIN_INTERVAL_SECONDS,
-      Math.min(MAX_INTERVAL_SECONDS, options.intervalSeconds ?? DEFAULT_INTERVAL_SECONDS)
-    );
-    const timeoutSec = Math.max(
-      MIN_INTERVAL_SECONDS * 2,
-      Math.min(MAX_TIMEOUT_SECONDS, options.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS)
-    );
-    const maxRetries = Math.max(0, Math.min(10, options.maxRetries ?? DEFAULT_MAX_RETRIES));
 
     const id = `mon_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const now = Date.now();
@@ -150,6 +348,8 @@ export class MonitorScheduler {
         intervalSeconds: intervalSec,
         timeoutSeconds: timeoutSec,
         maxRetries,
+        consecutiveMatches,
+        stableForSeconds,
         description: options.description,
       },
       status: "running",
@@ -158,6 +358,7 @@ export class MonitorScheduler {
       deadline,
       attempts: 0,
       consecutiveErrors: 0,
+      consecutiveMatches: 0,
       notified: false,
     };
 
@@ -166,9 +367,13 @@ export class MonitorScheduler {
       this.sessionMonitors.set(sessionId, new Set());
     }
     this.sessionMonitors.get(sessionId)!.add(id);
+    this.interruptionNotified.delete(id);
 
     // Prune old records if exceeding max stored per session
     this.pruneSessionRecords(sessionId);
+
+    // Durable running descriptor so reload-lost monitors can be reported.
+    this.persist(record, "started");
 
     // Cancel any pending clear-widget timer for this session
     const clearTimer = this.clearWidgetTimers.get(sessionId);
@@ -183,17 +388,18 @@ export class MonitorScheduler {
     }, timeoutSec * 1000);
     this.deadlineTimers.set(id, dlTimer);
 
-    // Update UI immediately to show the running card
-    this.updateUI(sessionId);
-
-    // Schedule initial check
+    // Schedule initial check, then update the UI so nextCheckAt is current.
+    record.nextCheckAt = now + 500;
     const initialTimer = setTimeout(() => {
       this.timers.delete(id);
       void this.pollStep(id);
     }, 500);
     this.timers.set(id, initialTimer);
 
-    return record;
+    // Update UI immediately to show the running card
+    this.updateUI(sessionId);
+
+    return { record, reused: false };
   }
 
   private handleDeadlineTimeout(id: string, generation: number): void {
@@ -204,7 +410,12 @@ export class MonitorScheduler {
     this.finishRecord(record, "timed_out", `Hard timeout reached (${record.options.timeoutSeconds}s)`);
   }
 
-  public cancel(id: string, reason = "User or agent requested cancellation", requestingSessionId?: string): boolean {
+  public cancel(
+    id: string,
+    reason = "User or agent requested cancellation",
+    requestingSessionId?: string,
+    kind: CancelKind = "explicit"
+  ): boolean {
     const record = this.records.get(id);
     if (!record || record.status !== "running") {
       return false;
@@ -214,10 +425,11 @@ export class MonitorScheduler {
       return false;
     }
 
-    record.status = "cancelled";
+    record.status = kind === "interrupted" ? "interrupted" : "cancelled";
     record.terminalReason = reason;
+    record.interruptedBy = kind === "interrupted" ? reason : undefined;
     record.completedAt = Date.now();
-    record.notified = true; // Suppress notification on explicit cancellation
+    record.notified = true; // Never wake a turn for a cancellation or interruption
     record.generation++; // Invalidate any in-flight step
 
     // Abort any in-flight execution
@@ -228,6 +440,20 @@ export class MonitorScheduler {
     }
 
     // Clear timers
+    this.clearTimer(id);
+    this.inFlight.set(id, false);
+
+    // Persist the terminal descriptor and refresh UI.
+    this.persist(record, record.status, reason);
+    this.updateUI(record.sessionId);
+
+    // Smooth UI cleanup after 20s if no active monitors
+    this.checkScheduleWidgetCleanup(record.sessionId);
+
+    return true;
+  }
+
+  private clearTimer(id: string): void {
     const timer = this.timers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -238,23 +464,18 @@ export class MonitorScheduler {
       clearTimeout(dlTimer);
       this.deadlineTimers.delete(id);
     }
-
-    this.inFlight.set(id, false);
-
-    // Update UI immediately with cancelled status
-    this.updateUI(record.sessionId);
-
-    // Smooth UI cleanup after 20s if no active monitors
-    this.checkScheduleWidgetCleanup(record.sessionId);
-
-    return true;
   }
 
   public cancelSession(sessionId: string, reason = "Monitoring cancelled on session reset or switch"): void {
+    this.interruptSession(sessionId, reason);
+  }
+
+  /** Interrupt every running monitor for a session due to a lifecycle change. */
+  public interruptSession(sessionId: string, reason: string): void {
     const records = this.getSessionRecords(sessionId);
     for (const r of records) {
       if (r.status === "running") {
-        this.cancel(r.id, reason, sessionId);
+        this.cancel(r.id, reason, sessionId, "interrupted");
       }
     }
   }
@@ -264,19 +485,12 @@ export class MonitorScheduler {
     const ids = this.sessionMonitors.get(sessionId);
     if (ids) {
       for (const id of ids) {
-        const dlTimer = this.deadlineTimers.get(id);
-        if (dlTimer) {
-          clearTimeout(dlTimer);
-          this.deadlineTimers.delete(id);
-        }
-        const timer = this.timers.get(id);
-        if (timer) {
-          clearTimeout(timer);
-          this.timers.delete(id);
-        }
+        this.clearTimer(id);
         this.records.delete(id);
         this.inFlight.delete(id);
         this.abortControllers.delete(id);
+        this.interruptionNotified.delete(id);
+        this.lostNotified.delete(id);
       }
       this.sessionMonitors.delete(sessionId);
     }
@@ -287,6 +501,23 @@ export class MonitorScheduler {
     }
     this.uiContexts.delete(sessionId);
     this.toolContexts.delete(sessionId);
+    this.persisted.delete(sessionId);
+  }
+
+  /**
+   * Build a concise notice text for the given lifecycle observations. Used by
+   * non-UI delivery (for example the `nextTurn` context message), so an
+   * interruption is never silent when there is no UI.
+   */
+  public buildLifecycleNotice(
+    lost: readonly MonitorPersistEntry[],
+    interruptedNotice: string | undefined
+  ): string | undefined {
+    const parts: string[] = [];
+    const lostNotice = formatLostMonitorNotice(lost);
+    if (lostNotice) parts.push(lostNotice);
+    if (interruptedNotice) parts.push(interruptedNotice);
+    return parts.length > 0 ? parts.join("\n") : undefined;
   }
 
   private async pollStep(id: string): Promise<void> {
@@ -312,6 +543,7 @@ export class MonitorScheduler {
 
       this.inFlight.set(id, true);
       record.attempts++;
+      record.lastAttemptAt = now;
       record.lastCheckedAt = now;
 
       const controller = new AbortController();
@@ -323,9 +555,10 @@ export class MonitorScheduler {
         parentToolCallId: "pi-monitor:" + record.id,
       };
 
-      let queryResult: { content: string; structuredContent?: unknown; isError: boolean; errorText?: string };
+      let queryResult: { content: string; structuredContent?: unknown; isError: boolean; errorText?: string; toolName?: string };
       try {
-        queryResult = await this.toolExecutor(record.tool, record.args, executionOptions, targetCtx);
+        const outcome = await this.toolExecutor(record.tool, record.args, executionOptions, targetCtx);
+        queryResult = { ...outcome, toolName: record.tool };
       } catch (err: unknown) {
         // If aborted locally by cancel/timeout
         if (controller.signal.aborted || record.status !== "running" || record.generation !== currentGen) {
@@ -335,6 +568,7 @@ export class MonitorScheduler {
           content: "",
           isError: true,
           errorText: err instanceof Error ? err.message : String(err),
+          toolName: record.tool,
         };
       } finally {
         this.inFlight.set(id, false);
@@ -358,9 +592,16 @@ export class MonitorScheduler {
       }
       record.lastResult = queryResult;
 
-      // Handle execution errors with bounded backoff retry
+      // Handle execution errors with bounded backoff retry.
+      // Errors are not observed samples: they reset match progress and clear the
+      // last observed field value so a stale value never looks current.
       if (queryResult.isError) {
         record.consecutiveErrors++;
+        record.lastErrorAt = Date.now();
+        record.lastErrorText = queryResult.errorText ? queryResult.errorText.slice(0, 200) : undefined;
+        record.consecutiveMatches = 0;
+        record.firstMatchAt = undefined;
+        record.lastObservedValue = undefined;
         if (record.consecutiveErrors > record.options.maxRetries) {
           const errDetail = queryResult.errorText ? `: ${queryResult.errorText}` : "";
           this.finishRecord(record, "failed", `Consecutive errors (${record.consecutiveErrors}) exceeded retry limit${errDetail}`);
@@ -372,23 +613,49 @@ export class MonitorScheduler {
           record.options.intervalSeconds,
           Math.min(30, record.options.intervalSeconds * Math.pow(1.5, record.consecutiveErrors))
         );
-        this.updateUI(record.sessionId);
         this.scheduleNext(id, currentGen, backoffSec * 1000);
         return;
       }
 
-      // Execution succeeded, reset consecutive errors
+      // Execution succeeded
       record.consecutiveErrors = 0;
+      record.lastErrorText = undefined;
+      record.lastSuccessAt = Date.now();
 
       // Evaluate match condition
       const match = matchesCondition(record.condition, queryResult);
+      const observed = observeConditionValue(record.condition, queryResult);
+      // Update or clear the observed value: a field that disappeared on a
+      // successful sample must not leave a stale value on screen.
+      record.lastObservedValue = observed ? { ...observed, matched: match.matched } : undefined;
+
       if (match.matched) {
-        this.finishRecord(record, "completed", match.reason ?? "Configured condition matched");
+        if (record.consecutiveMatches === 0 || record.firstMatchAt === undefined) {
+          record.firstMatchAt = Date.now();
+        }
+        record.consecutiveMatches++;
+
+        const required = record.options.consecutiveMatches;
+        const stableMs = record.options.stableForSeconds * 1000;
+        const stableElapsed = Date.now() - (record.firstMatchAt ?? Date.now());
+        if (record.consecutiveMatches >= required && stableElapsed >= stableMs) {
+          const detail = required > 1 || record.options.stableForSeconds > 0
+            ? `${match.reason ?? "Condition matched"} (stable: ${record.consecutiveMatches}/${required} matches, ${Math.floor(stableElapsed / 1000)}s)`
+            : match.reason ?? "Configured condition matched";
+          this.finishRecord(record, "completed", detail);
+          return;
+        }
+
+        // Matched but stability not yet satisfied; keep waiting.
+        this.scheduleNext(id, currentGen, record.options.intervalSeconds * 1000);
         return;
       }
 
-      // Condition not yet met: schedule next routine check
-      this.updateUI(record.sessionId);
+      // Observed miss: reset stability progress.
+      record.consecutiveMatches = 0;
+      record.firstMatchAt = undefined;
+
+      // Condition not yet met: schedule next routine check.
       this.scheduleNext(id, currentGen, record.options.intervalSeconds * 1000);
     } catch (unexpectedError) {
       console.error("[pi-monitor] unexpected error in pollStep:", unexpectedError);
@@ -399,11 +666,14 @@ export class MonitorScheduler {
     const record = this.records.get(id);
     if (!record || record.status !== "running" || record.generation !== generation) return;
 
+    record.nextCheckAt = Date.now() + delayMs;
     const timer = setTimeout(() => {
       this.timers.delete(id);
       void this.pollStep(id);
     }, delayMs);
     this.timers.set(id, timer);
+    // Refresh the UI after nextCheckAt is set so the health line is current.
+    this.updateUI(record.sessionId);
   }
 
   private finishRecord(record: MonitorRecord, status: "completed" | "failed" | "timed_out", reason: string): void {
@@ -412,6 +682,7 @@ export class MonitorScheduler {
     record.status = status;
     record.terminalReason = reason;
     record.completedAt = Date.now();
+    record.nextCheckAt = undefined;
     record.generation++; // Invalidate pending steps
 
     // Abort controller and timers cleanup
@@ -420,17 +691,10 @@ export class MonitorScheduler {
       controller.abort();
       this.abortControllers.delete(record.id);
     }
-    const timer = this.timers.get(record.id);
-    if (timer) {
-      clearTimeout(timer);
-      this.timers.delete(record.id);
-    }
-    const dlTimer = this.deadlineTimers.get(record.id);
-    if (dlTimer) {
-      clearTimeout(dlTimer);
-      this.deadlineTimers.delete(record.id);
-    }
+    this.clearTimer(record.id);
     this.inFlight.set(record.id, false);
+
+    this.persist(record, status, reason);
 
     // Update UI immediately with final state
     this.updateUI(record.sessionId);
@@ -525,3 +789,18 @@ export class MonitorScheduler {
     }
   }
 }
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+/** Canonical digest of tool arguments; never stores the raw arguments. */
+function safeArgsHash(args: Record<string, unknown>): string {
+  try {
+    return canonicalJson(args);
+  } catch {
+    return "[unhashable]";
+  }
+}
+
+export type { MonitorStatus };

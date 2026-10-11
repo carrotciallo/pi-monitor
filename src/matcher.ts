@@ -1,6 +1,7 @@
 import { RE2JS } from "re2js";
 import { createHash } from "node:crypto";
-import type { MatchEvaluationResult, MonitorCondition } from "./types.ts";
+import { resolveStructuredSource } from "./shell-json.ts";
+import type { MatchEvaluationResult, MonitorCondition, ObservedValue } from "./types.ts";
 
 const VALID_FIELD_OPERATORS = [
   "equals",
@@ -22,6 +23,9 @@ export function validateCondition(condition: MonitorCondition): void {
   if ("field" in condition) {
     if (typeof condition.field !== "string" || !condition.field.trim()) {
       throw new Error("FieldCondition 'field' must be a non-empty string");
+    }
+    if (condition.field.length > MAX_CONDITION_FIELD_LENGTH) {
+      throw new Error(`FieldCondition 'field' must not exceed ${MAX_CONDITION_FIELD_LENGTH} characters`);
     }
     const condRecord = condition as unknown as Record<string, unknown>;
     const specifiedOps = VALID_FIELD_OPERATORS.filter(op => condRecord[op] !== undefined);
@@ -195,9 +199,11 @@ export function computeSha256(val: unknown): string {
  */
 export function matchesCondition(
   condition: MonitorCondition,
-  result: { isError: boolean; content: string; structuredContent?: unknown },
+  result: { isError: boolean; content: string; structuredContent?: unknown; toolName?: string },
 ): MatchEvaluationResult {
   try {
+    // Validate condition and any host structured value BEFORE adaptation, so
+    // exotic accessors are rejected by canonicalJson rather than being executed.
     canonicalJson(condition);
     if (result.structuredContent !== undefined) canonicalJson(result.structuredContent);
     return evaluateCondition(condition, result);
@@ -208,7 +214,7 @@ export function matchesCondition(
 
 function evaluateCondition(
   condition: MonitorCondition,
-  result: { isError: boolean; content: string; structuredContent?: unknown },
+  result: { isError: boolean; content: string; structuredContent?: unknown; toolName?: string },
 ): MatchEvaluationResult {
   // RULE 1: An execution error is NEVER a successful condition match.
   if (result.isError) {
@@ -227,21 +233,14 @@ function evaluateCondition(
 
   // 1. Field condition (structured)
   if ("field" in condition) {
-    let sourceObj: unknown = result.structuredContent;
-
-    // Fallback: If structuredContent is missing or not an object, try parsing content as JSON
-    if ((sourceObj === null || typeof sourceObj !== "object") && safeContent) {
-      try {
-        sourceObj = JSON.parse(safeContent);
-      } catch {
-        // Not JSON text
-      }
+    // Strict adaptation: structuredContent, a known shell envelope (only for
+    // shell tools, only on success), or intact JSON text. No fuzzy extraction.
+    const source = resolveStructuredSource(result);
+    if (!source || source.value === null || typeof source.value !== "object") {
+      return { matched: false, reason: `Field '${condition.field}' not found (result is not structured JSON)` };
     }
 
-    if (sourceObj === null || typeof sourceObj !== "object") {
-      return { matched: false, reason: `Field '${condition.field}' not found (result is not structured)` };
-    }
-
+    const sourceObj = source.value;
     canonicalJson(sourceObj);
     const value = getNestedField(sourceObj, condition.field);
     if (value === undefined) {
@@ -340,4 +339,83 @@ function evaluateCondition(
   }
 
   return { matched: false, reason: "Unsupported condition format" };
+}
+
+/** Maximum length of the bounded observed-value string shown in the UI. */
+export const MAX_OBSERVED_VALUE_LENGTH = 80;
+
+/** Maximum length of the bounded field label shown in the UI. */
+export const MAX_OBSERVED_FIELD_LENGTH = 60;
+
+/** Maximum length of a condition field path. */
+export const MAX_CONDITION_FIELD_LENGTH = 256;
+
+const SENSITIVE_WORDS = new Set([
+  "key", "keys", "token", "tokens", "secret", "secrets", "password", "passwd", "pass",
+  "auth", "authorization", "credential", "credentials", "apikey", "apisecret", "accesskey", "privatekey",
+]);
+
+function isSensitiveField(path: string): boolean {
+  const segments = path.replace(/\[(\w+)\]/g, ".$1").split(".").filter(Boolean);
+  const words = segments.flatMap(segment =>
+    segment
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/[^A-Za-z0-9]+/g, " ")
+      .toLowerCase()
+      .split(" ")
+      .filter(Boolean)
+  );
+  return words.some(word => SENSITIVE_WORDS.has(word));
+}
+
+/**
+ * Renders only a scalar value for UI display. Composite values are collapsed to
+ * a placeholder so no nested object contents (which may include secrets the
+ * field-path heuristic does not recognize) are ever rendered.
+ */
+function compactValueString(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `[array: ${value.length}]`;
+  switch (typeof value) {
+    case "string":
+      return value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim();
+    case "number":
+    case "boolean":
+    case "bigint":
+      return String(value);
+    case "object":
+      return "[object]";
+    default:
+      return `[${typeof value}]`;
+  }
+}
+
+/**
+ * Extracts a concise, bounded, redacted observation of the condition's relevant
+ * field for UI health display. Returns undefined when the condition has no
+ * single relevant field (text/regex/hash conditions) or no structured value.
+ * Never exposes the whole result.
+ */
+export function observeConditionValue(
+  condition: MonitorCondition,
+  result: { isError: boolean; content: string; structuredContent?: unknown; toolName?: string },
+): ObservedValue | undefined {
+  if (result.isError || !("field" in condition)) return undefined;
+
+  const source = resolveStructuredSource(result);
+  if (!source || source.value === null || typeof source.value !== "object") return undefined;
+
+  const value = getNestedField(source.value, condition.field);
+  if (value === undefined) return undefined;
+
+  const redacted = isSensitiveField(condition.field);
+  const rendered = redacted ? "[REDACTED]" : compactValueString(value);
+  const bounded = Array.from(rendered).slice(0, MAX_OBSERVED_VALUE_LENGTH).join("");
+  const fieldLabel = Array.from(condition.field.replace(/[\x00-\x1f\x7f-\x9f]/g, " ")).slice(0, MAX_OBSERVED_FIELD_LENGTH).join("");
+
+  return {
+    field: condition.field.length > MAX_OBSERVED_FIELD_LENGTH ? fieldLabel + "…" : fieldLabel,
+    value: rendered.length > MAX_OBSERVED_VALUE_LENGTH ? bounded + "…" : bounded,
+    matched: false,
+  };
 }

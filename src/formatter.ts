@@ -30,6 +30,9 @@ export function formatStatusBadge(status: MonitorStatus, consecutiveErrors = 0):
   if (status === "timed_out") {
     return `${ANSI.red}${ANSI.bold}[TIMED_OUT]${ANSI.reset}`;
   }
+  if (status === "interrupted") {
+    return `${ANSI.yellow}${ANSI.bold}[INTERRUPTED]${ANSI.reset}`;
+  }
   if (status === "cancelled") {
     return `${ANSI.gray}${ANSI.bold}[CANCELLED]${ANSI.reset}`;
   }
@@ -60,7 +63,9 @@ export function formatElapsedTime(startMs: number, endMs = Date.now()): string {
   if (totalSec < 60) return `${totalSec}s`;
   const min = Math.floor(totalSec / 60);
   const sec = totalSec % 60;
-  return `${min}m ${sec}s`;
+  if (min < 60) return `${min}m ${sec}s`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
 }
 
 export function formatTimeHHMMSS(timestamp: number): string {
@@ -69,9 +74,51 @@ export function formatTimeHHMMSS(timestamp: number): string {
 }
 
 /**
+ * Renders the compact health suffix: match progress, stability progress, last
+ * success age, retries and next check. Only bounded, pre-redacted fields from
+ * the record are used.
+ */
+export function formatHealthSuffix(record: MonitorRecord, now = Date.now()): string {
+  const parts: string[] = [];
+  const required = record.options.consecutiveMatches;
+  if (required > 1 || record.consecutiveMatches > 0) {
+    parts.push(`match ${record.consecutiveMatches}/${required}`);
+  }
+  // Stability progress: how long the match must still hold vs. required.
+  if (record.options.stableForSeconds > 0) {
+    const elapsed = record.firstMatchAt !== undefined ? Math.floor((now - record.firstMatchAt) / 1000) : 0;
+    parts.push(`stable ${elapsed}s/${record.options.stableForSeconds}s`);
+  }
+  // Last success age reassures the query itself is healthy.
+  if (typeof record.lastSuccessAt === "number") {
+    const age = Math.max(0, Math.floor((now - record.lastSuccessAt) / 1000));
+    parts.push(`ok ${age}s ago`);
+  }
+  if (record.consecutiveErrors > 0) {
+    parts.push(`errors ${record.consecutiveErrors}`);
+  }
+  const nextAt = record.nextCheckAt;
+  if (record.status === "running" && typeof nextAt === "number") {
+    const remaining = Math.max(0, Math.ceil((nextAt - now) / 1000));
+    parts.push(`next ${remaining}s`);
+  }
+  return parts.join(" · ");
+}
+
+/**
+ * Renders the concise relevant field observation `field=value`, or undefined.
+ * The value is bounded and already redacted by the scheduler.
+ */
+export function formatObservedValue(record: MonitorRecord): string | undefined {
+  const observed = record.lastObservedValue;
+  if (!observed) return undefined;
+  return `${observed.field}=${observed.value}`;
+}
+
+/**
  * Builds the lines displayed in Pi-Web above-editor widget.
  */
-export function formatWidgetLines(records: MonitorRecord[]): string[] {
+export function formatWidgetLines(records: MonitorRecord[], now = Date.now()): string[] {
   if (records.length === 0) return [];
   const active = records.filter(r => r.status === "running");
   const visible = (active.length > 0 ? active : records)
@@ -79,15 +126,19 @@ export function formatWidgetLines(records: MonitorRecord[]): string[] {
     .slice(0, active.length > 0 ? 5 : 1);
   const labels: Record<MonitorStatus, string> = {
     running: "Running", completed: "Completed", failed: "Failed",
-    timed_out: "Timed out", cancelled: "Cancelled",
+    timed_out: "Timed out", interrupted: "Interrupted", cancelled: "Cancelled",
   };
   return visible.map(r => {
     const name = Array.from((r.options.description || "Background monitor").replace(/\s+/g, " ").trim());
     const label = name.length > 20 ? name.slice(0, 19).join("") + "…" : name.join("");
     const status = r.status === "running" && r.consecutiveErrors > 0 ? "Retrying" : labels[r.status];
     const color = r.status === "running" ? ANSI.cyan : r.status === "completed" ? ANSI.green : ANSI.gray;
-    const elapsed = formatElapsedTime(r.startedAt, r.completedAt ?? Date.now());
-    return `${color}${status}${ANSI.reset} ${label} · ${r.attempts} checks · ${elapsed}`;
+    const elapsed = formatElapsedTime(r.startedAt, r.completedAt ?? now);
+    const health = formatHealthSuffix(r, now);
+    const observed = formatObservedValue(r);
+    const details = [health, observed].filter(Boolean).join(" · ");
+    const suffix = details ? ` · ${details}` : "";
+    return `${color}${status}${ANSI.reset} ${label} · ${r.attempts} checks · ${elapsed}${suffix}`;
   });
 }
 
@@ -103,6 +154,7 @@ export function formatCompletionNotification(record: MonitorRecord): string {
     completed: "The configured condition matched; this establishes only that condition.",
     failed: "The monitoring query failed; this does not establish failure of the underlying operation.",
     timed_out: "The condition was not observed before the deadline; this does not establish failure of the underlying operation.",
+    interrupted: "Monitoring ended because the session lifecycle changed; the underlying operation was not necessarily cancelled.",
     cancelled: "Monitoring was cancelled; the underlying operation was not necessarily cancelled.",
   };
   return [
@@ -113,4 +165,21 @@ export function formatCompletionNotification(record: MonitorRecord): string {
     `Elapsed: ${duration}; checks: ${record.attempts}.`,
     "This is a status report, not authorization for automatic retries or further actions. Use monitor_status for details if needed.",
   ].join("\n");
+}
+
+/**
+ * Builds a concise resume notice for monitors interrupted by a session lifecycle
+ * change. Used for UI notification and non-UI context delivery; it is not
+ * delivered as a turn-waking message.
+ */
+export function formatInterruptionNotice(
+  records: ReadonlyArray<{ id: string; options?: { description?: string } }>
+): string | undefined {
+  if (records.length === 0) return undefined;
+  const labels = records.map(r => {
+    const description = r.options?.description;
+    const name = description ? ` (${Array.from(description.replace(/\s+/g, " ").trim()).slice(0, 40).join("")})` : "";
+    return `${r.id}${name}`;
+  });
+  return `[Pi-Monitor] ${records.length} background monitor(s) interrupted by a session/branch change and stopped: ${labels.join(", ")}. Use monitor_status for details and restart if still needed.`;
 }

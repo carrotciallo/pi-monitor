@@ -57,11 +57,11 @@ test("scheduler enforces MAX_CONCURRENT_MONITORS (5)", () => {
   const { ctx } = createMockContext("s1");
 
   for (let i = 0; i < 5; i++) {
-    scheduler.startMonitor("s1", "check_status", {}, { textContains: "done" }, { intervalSeconds: 5 }, ctx);
+    scheduler.startMonitor("s1", "check_status", { idx: i }, { textContains: "done" }, { intervalSeconds: 5 }, ctx);
   }
 
   assert.throws(() => {
-    scheduler.startMonitor("s1", "check_status", {}, { textContains: "done" }, { intervalSeconds: 5 }, ctx);
+    scheduler.startMonitor("s1", "check_status", { idx: 99 }, { textContains: "done" }, { intervalSeconds: 5 }, ctx);
   }, /Exceeded maximum concurrent monitors limit/);
 
   // Different session can still start

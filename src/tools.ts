@@ -138,17 +138,22 @@ export function sanitizeRecord(record: MonitorRecord): Record<string, unknown> {
       errorText: record.lastResult.errorText ? cleanControlCharacters(record.lastResult.errorText) : undefined,
     };
   }
-  return {
+  const safeRecord: Record<string, unknown> = {
     ...record,
     args: safeArgs,
     lastResult: safeLastResult,
   };
+  // Health text is bounded and redacted at capture time; still clean control chars.
+  if (safeRecord.lastErrorText) {
+    safeRecord.lastErrorText = cleanControlCharacters(String(safeRecord.lastErrorText)).slice(0, 200);
+  }
+  return safeRecord;
 }
 
 export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorScheduler) {
   const ConditionSchema = Type.Union([
     Type.Object({
-      field: Type.String({ minLength: 1, description: "Dot-separated result field path, e.g. data.state" }),
+      field: Type.String({ minLength: 1, maxLength: 256, description: "Dot-separated result field path, e.g. data.state" }),
       equals: Type.Optional(Type.Unknown({ description: "Value the field must equal" })),
       notEquals: Type.Optional(Type.Unknown({ description: "Value the field must not equal" })),
       in: Type.Optional(Type.Array(Type.Unknown(), { description: "Field must be one of these values" })),
@@ -179,8 +184,10 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
       args: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Argument object passed to the tool; defaults to {}" })),
       condition: ConditionSchema,
       intervalSeconds: Type.Optional(Type.Number({ minimum: 2, maximum: 300, description: "Background polling interval in seconds (default 5)" })),
-      timeoutSeconds: Type.Optional(Type.Number({ minimum: 5, maximum: 600, description: "Maximum monitoring timeout in seconds (default 120)" })),
+      timeoutSeconds: Type.Optional(Type.Number({ minimum: 5, maximum: 604800, description: "Maximum monitoring timeout in seconds (default 120, maximum 604800 = 7 days)" })),
       maxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 10, description: "Backoff retries on transient execution errors (default 3)" })),
+      consecutiveMatches: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000, description: "Require this many consecutive matching samples before completing (default 1)" })),
+      stableForSeconds: Type.Optional(Type.Number({ minimum: 0, maximum: 604800, description: "Require the condition to stay matched this long before completing (default 0)" })),
       description: Type.Optional(Type.String({ maxLength: 100, description: "Short task label" })),
     }),
     async execute(_id, params, _signal, _update, ctx: ExtensionToolContext) {
@@ -215,7 +222,7 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
 
       const sessionId = ctx.sessionManager.getSessionId();
       try {
-        const record = scheduler.startMonitor(
+        const { record, reused } = scheduler.startOrReuseMonitor(
           sessionId,
           params.tool,
           params.args ?? {},
@@ -224,6 +231,8 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
             intervalSeconds: params.intervalSeconds,
             timeoutSeconds: params.timeoutSeconds,
             maxRetries: params.maxRetries,
+            consecutiveMatches: params.consecutiveMatches,
+            stableForSeconds: params.stableForSeconds,
             description: params.description,
           },
           ctx
@@ -231,18 +240,23 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
 
         const responseText = JSON.stringify({
           started: true,
+          reused,
           monitorId: record.id,
           status: record.status,
           tool: record.tool,
           intervalSeconds: record.options.intervalSeconds,
           timeoutSeconds: record.options.timeoutSeconds,
+          consecutiveMatches: record.options.consecutiveMatches,
+          stableForSeconds: record.options.stableForSeconds,
           description: record.options.description,
-          message: "Background monitor started. A terminal notification will resume the session when it finishes.",
+          message: reused
+            ? "An identical running monitor already exists; returning it instead of starting a duplicate."
+            : "Background monitor started. A terminal notification will resume the session when it finishes.",
         }, null, 2);
 
         return {
           content: [{ type: "text", text: responseText }],
-          details: { recordId: record.id, status: record.status },
+          details: { recordId: record.id, status: record.status, reused },
         };
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
