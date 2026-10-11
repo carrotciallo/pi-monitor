@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="390" viewBox="0 0 960 390" role="img" aria-labelledby="title desc">
   <title id="title">Pi Monitor background workflow</title>
-  <desc id="desc">The agent starts a bounded monitor and receives an ID immediately. A background scheduler queries a trusted read-only tool. A matching condition, query failure or timeout sends a concise status notification to resume the session. Cancellation stops queries without a notification.</desc>
+  <desc id="desc">The agent starts a bounded monitor and receives an ID immediately. A background scheduler queries a trusted tool or executes a shell command. Shell query-only behavior is a prompt constraint, not command filtering. A matching condition, query failure or timeout sends a concise status notification to resume the session. Cancellation stops queries without a notification.</desc>
   <defs>
     <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#667085"/></marker>
     <style>text{font-family:Arial,Helvetica,sans-serif;fill:#17212b} .h{font-size:20px;font-weight:700} .b{font-size:15px} .s{font-size:13px;fill:#475467} .line{fill:none;stroke:#667085;stroke-width:2;marker-end:url(#arrow)}</style>
@@ -15,7 +15,7 @@
   <path d="M252 150H310" class="line"/>
   <rect x="314" y="100" width="300" height="104" rx="6" fill="#eaf7f0" stroke="#77b795"/>
   <text x="332" y="132" class="h">Background scheduler</text>
-  <text x="332" y="158" class="b">Trusted read-only query</text>
+  <text x="332" y="158" class="b">Trusted query or shell command</text>
   <text x="332" y="184" class="s">Bounded interval, retries and deadline</text>
   <path d="M464 204V240H590" class="line"/>
   <text x="325" y="267" class="s">Match / query failure / timeout</text>

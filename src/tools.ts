@@ -1,3 +1,4 @@
+import { isAllowedShellQuery } from "./shell-policy.ts";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { validateCondition } from "./matcher.ts";
@@ -37,10 +38,15 @@ const KNOWN_READ_TOOLS = new Set([
 
 export function isAllowedMonitorTool(
   toolName: string,
-  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean }
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean },
+  args?: Record<string, unknown>
 ): boolean {
   if (!toolName || typeof toolName !== "string") {
     return false;
+  }
+
+  if (toolName === "bash" || toolName === "hypa_shell") {
+    return args !== undefined && isAllowedShellQuery(args);
   }
 
   // 1. Exact forbidden tools
@@ -167,9 +173,9 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
   pi.registerTool(defineTool({
     name: "monitor_start",
     label: "Start background monitor",
-    description: "Poll a trusted read-only tool in the background until a condition matches or a limit is reached. Returns immediately; completion, query failure, or timeout resumes the session with a status report.",
+    description: "Poll a trusted read-only tool or shell query in the background. Returns immediately; a match, query failure or timeout resumes the session. Shell: repeat status checks only, never task starts or mutations.",
     parameters: Type.Object({
-      tool: Type.String({ description: "Read-only tool name" }),
+      tool: Type.String({ description: "Query tool name; bash/hypa_shell accept any command without command-level filtering" }),
       args: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Argument object passed to the tool; defaults to {}" })),
       condition: ConditionSchema,
       intervalSeconds: Type.Optional(Type.Number({ minimum: 2, maximum: 300, description: "Background polling interval in seconds (default 5)" })),
@@ -188,9 +194,9 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
         };
       }
 
-      if (!isAllowedMonitorTool(params.tool, targetTool.annotations)) {
+      if (!isAllowedMonitorTool(params.tool, targetTool.annotations, params.args ?? {})) {
         return {
-          content: [{ type: "text", text: `Cannot start monitor: tool '${params.tool}' is not in the trusted read-only allowlist and cannot be used for background monitoring` }],
+          content: [{ type: "text", text: `Cannot start monitor: '${params.tool}' requires a nonempty command (bash/hypa_shell) or trusted read-only eligibility; it cannot be used for background monitoring with these arguments` }],
           details: { error: `Tool '${params.tool}' is not permitted for background monitoring` },
           isError: true,
         };

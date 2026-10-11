@@ -37,7 +37,7 @@ A typical tool argument object:
 }
 ```
 
-`job_status` is illustrative: the named tool must actually exist and pass the read-only policy. Shell commands, writes, generic gateways, and mutating tools cannot be monitored.
+`job_status` is illustrative: the named tool must exist and pass the tool policy. `bash` and `hypa_shell` also accept any nonempty `command`, including pipelines and scripts. Other writes, generic gateways and mutating tools remain blocked. Shell commands are not inspected: the query-only rule is a prompt constraint, not enforcement.
 
 ## Behavior
 
@@ -52,7 +52,7 @@ A typical tool argument object:
 
 ## Safety and Limits
 
-Tool execution goes through the host permission and hook pipeline. The read-only policy is default-deny, with selected built-in readers and suitably annotated query tools. Read-only annotations are a trust signal, not a sandbox; install only trusted tools and extensions.
+Tool execution goes through the host permission and hook pipeline. Non-shell tools use a default-deny read-only policy, with selected built-in readers and suitably annotated query tools. `bash` and `hypa_shell` bypass this policy when a nonempty command is supplied, including when marked destructive; commands are passed unchanged to the host. Prompts instruct the agent to repeat status queries only, never task starts or mutations. This is not a command filter or sandbox: any side effect in a supplied command repeats on each check. Existing host permissions still apply.
 
 A scoped, one-use call lease supports compatible external repeat guards. An external guard must understand these leases or otherwise allow bounded background queries; this repository does not install or disable a guard. In-process malicious extensions are outside the isolation boundary.
 
