@@ -173,7 +173,7 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
   pi.registerTool(defineTool({
     name: "monitor_start",
     label: "Start background monitor",
-    description: "Poll a trusted read-only tool or shell query in the background. Returns immediately; a match, query failure or timeout resumes the session. Shell: repeat status checks only, never task starts or mutations.",
+    description: "Default for waiting on pending tasks: poll a trusted read-only tool or shell query in the background. Returns immediately; a match, query failure or timeout resumes the session. Shell: status queries only, never task starts or mutations.",
     parameters: Type.Object({
       tool: Type.String({ description: "Query tool name; bash/hypa_shell accept any command without command-level filtering" }),
       args: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Argument object passed to the tool; defaults to {}" })),

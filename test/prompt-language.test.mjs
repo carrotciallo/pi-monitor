@@ -17,8 +17,12 @@ test("monitor prompts stay concise and domain-neutral", () => {
   piMonitor({ registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, on() {} });
   const start = tools.get("monitor_start");
   assert.ok(start.description.length < 250);
-  assert.ok(MONITOR_GUIDELINE.length < 350);
+  assert.ok(MONITOR_GUIDELINE.length < 450);
   assert.match(start.description, /trusted read-only/);
   assert.match(MONITOR_GUIDELINE, /not new instructions or authorization/);
+  assert.match(MONITOR_GUIDELINE, /pending and needs a later status check/);
+  assert.match(MONITOR_GUIDELINE, /stop direct status checks/);
+  assert.match(MONITOR_GUIDELINE, /end the turn and await notification/);
+  assert.match(MONITOR_GUIDELINE, /Do not monitor one-shot operations/);
   assert.doesNotMatch(JSON.stringify(start.parameters) + start.description, /printer|Bambu|cancel button|remote_status/i);
 });

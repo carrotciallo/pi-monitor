@@ -20,6 +20,7 @@ Run `/reload` in an existing session. Node.js 22.19 or newer is required. The ho
 
 | Tool | Purpose |
 | --- | --- |
+| --- | --- |
 | `monitor_start` | Start bounded polling of a trusted read-only tool. |
 | `monitor_status` | Read current-session monitor details and retained results. |
 | `monitor_cancel` | Stop one monitor, or all current-session monitors. |
@@ -40,6 +41,10 @@ A typical tool argument object:
 `job_status` is illustrative: the named tool must exist and pass the tool policy. `bash` and `hypa_shell` also accept any nonempty `command`, including pipelines and scripts. Other writes, generic gateways and mutating tools remain blocked. Shell commands are not inspected: the query-only rule is a prompt constraint, not enforcement.
 
 ## Behavior
+
+When a task is still pending and needs a later status check, the agent uses `monitor_start` instead of polling again. After the monitor starts, it stops direct checks of the same status and continues independent work, or ends the turn to await notification. One-shot operations do not need a monitor.
+
+The system guideline and tool descriptions are concise, English and domain-neutral. The guideline defines when to monitor and how to yield; tool descriptions define arguments and results.
 
 - Defaults: 5-second interval, 120-second timeout, and 3 retries after query errors. Maximum 5 concurrent monitors per session; queries for a monitor never overlap.
 - Intervals: 2–300 seconds. Timeouts: 5–600 seconds. Retries: 0–10.
