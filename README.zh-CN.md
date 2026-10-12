@@ -115,10 +115,25 @@ Agent 提交异步作业后，启动监控并设定条件，立即结束当前�
   - `consecutiveMatches`（1–1000，默认 1）：要求连续命中指定次数。
   - `stableForSeconds`（0–604800，默认 0）：要求命中状态持续稳定保持指定秒数。
   - 只要出现一次未命中或查询错误，防抖进度立即重置，杜绝瞬态假报警。
-- **智能去重 (Deduplication)**：同一会话内，若工具、规范化参数、判定条件与轮询配置完全相同，`monitor_start` 自动复用正在运行的监控并标记 `reused: true`。
+- **智能去重 (Deduplication)**：同一会话内，若工具、规范化参数、判定条件、`display` 声明与轮询配置完全相同，`monitor_start` 自动复用正在运行的监控并标记 `reused: true`。
 - **匹配引擎**：支持结构化字段比对（相等、包含、数值范围）、否定感知文本匹配、RE2JS 正则表达式或 SHA-256 校验。RE2JS 引擎在源头根除 ReDoS 正则回溯漏洞。
 - **UI 与通知体验**：
   - UI 呈现状态徽标、任务摘要、查询计数、耗时、健康采样进度及相关字段值。终态短暂保留后自动回收。
+  - **进度显示（`display`）**：最多声明 4 个结果字段投射到实时 widget，被轮询的脚本因此无需用户追问即可上报进度——如下载百分比、条目计数、传输速率。每项指定字段路径，可选 `label`、`total` 或 `totalField`：
+
+    ```jsonc
+    {
+      "tool": "read",
+      "args": { "path": "/tmp/progress.json" },
+      "condition": { "field": "status", "equals": "done" },
+      "display": [
+        { "field": "downloaded", "label": "progress", "totalField": "totalBytes" },
+        { "field": "speed", "label": "speed" }
+      ]
+    }
+    ```
+
+    渲染为 `progress=530/1000 · speed=1.2MB/s`。`totalField` 读取同级字段，优先级高于固定的 `total`。取值上限 80 字符；敏感字段路径（含 `key`、`token`、`secret`、`password` 等）显示为 `[REDACTED]`；复合值塌缩为 `[object]` 或 `[array: N]`。查询失败或字段缺失时清空该片段，绝不残留陈旧读数。省略 `display` 时 widget 行为与原先完全一致。
   - 达成条件、超时或致命错误后，通过精炼通知唤醒会话回合。原始完整响应与排查细节保存在 `monitor_status` 中，不挤占通知上下文。
 - **生命周期隔离**：分支切换、会话切换、重载或关闭时，监控自动标记为 `interrupted`（被中断）优雅停止，绝不跨分支/跨会话误唤醒。
 
@@ -126,10 +141,37 @@ Agent 提交异步作业后，启动监控并设定条件，立即结束当前�
 
 ## 安全策略与限制
 
-- **只读策略**：非 shell 工具默认执行严格拒绝的只读策略，仅允许选定内置读取工具及带只读注解的查询。
+- **Default-Deny 只读策略**：非 shell 工具必须可证为只读。已知内置读取工具，或自行声明 `readOnlyHint: true` 的工具才会被放行；无证据一律拒绝。
+- **注解能跨过适配器**：部分 MCP 适配器注册工具时不转发 server 的 `annotations`，会让明确声明只读的工具看起来没有证据。遇到这种情况，pi-monitor 会从适配器的磁盘缓存里找回该声明。它只是证据、绝非授权：无法越过下方硬拦，缓存里标了 `readOnlyHint: true` 的变异类工具名依然会被拒绝。
+- **硬拦优先于一切**：禁用网关（`mcp`、`mcpScript`）、MCP 命名空间代理（`mcp__*`）、`destructiveHint: true` 及变异类工具名，都在查注解和信任规则**之前**就被拒绝。因此误标的 `readOnlyHint` 无法放行危险工具；信任一个代理也无法把其背后的全部工具交给监控。
 - **Shell 查询约束**：`bash` 和 `hypa_shell` 接受非空只读命令。提示词强约束 Agent 仅执行状态查询，非沙箱命令过滤器；命令原样交由宿主执行并继承宿主权限链路。
 - **租约隔离 (Call Lease)**：提供限定作用域的单次调用租约，无缝兼容外部防重放/防死循环守卫扩展。
 - **内存安全与脱敏**：运行时监控状态驻留内存，历史审计记录严格限制在每个会话最多 10 条，敏感参数脱敏与结果截断双重防护。
+
+### 为宿主无法背书的工具授权
+
+许多 MCP server 对工具的描述很粗糙甚至完全缺失，默认拒绝会把它们挡在门外。与其为所有工具放宽默认策略，不如在 Markdown 文件里为你确认过的工具单独背书——理由和规则写在一起：
+
+```markdown
+# pi-monitor 信任清单
+
+## Allow
+- `mail_list_*` — 只读列表类查询；该 server 未提供注解
+- index_search
+
+## Deny
+- mail_get_emails_content
+```
+
+- **用户级**：`~/.pi/agent/pi-monitor.md`，始终读取。可用环境变量 `PI_MONITOR_TRUST_FILE` 改到其他位置。
+- **项目级**：项目根目录的 `PI-MONITOR.md`，**仅当项目受信任时**才读取，避免不可信仓库自我提权。
+- 模式为 glob：`*` 匹配任意字符，`?` 匹配单个字符，大小写不敏感。
+- 只有 `Allow`/`Deny` 标题下的 `-` 列表项才算规则，其余内容均为文档并被忽略，因此文件可以自我说明。
+- 显式 `Deny` 优先于注解；显式 `Allow` 可放行无注解工具。两者都无法越过硬拦。
+
+带注释的起手模板见 [`docs/trust-example.md`](docs/trust-example.md)：复制到 `~/.pi/agent/pi-monitor.md` 后改两个列表即可。
+
+缓存回退的来源路径可用 `PI_MONITOR_MCP_CACHE` 覆盖（默认 `~/.pi/agent/mcp-cache.json`）。
 
 ---
 

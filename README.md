@@ -116,10 +116,25 @@ When a task is pending and requires a later check, the agent calls `monitor_star
   - `consecutiveMatches` (1–1000, default 1): Requires N continuous observed matches.
   - `stableForSeconds` (0–604800, default 0): Requires condition to hold continuously for at least N seconds.
   - Any miss or query failure immediately resets stability counters to prevent premature completion.
-- **Smart Deduplication**: Starting a monitor with the same tool, canonical-JSON arguments, condition, and polling config reuses the existing active monitor and sets `reused: true`.
+- **Smart Deduplication**: Starting a monitor with the same tool, canonical-JSON arguments, condition, `display` declaration, and polling config reuses the existing active monitor and sets `reused: true`.
 - **Matching Engine**: Supports structured field checks (equality, numeric comparison, array inclusion), negation-aware text matching, RE2JS regular expressions, or SHA-256 hashes. RE2JS eliminates ReDoS risks.
 - **UI & Resumption**:
   - Displays live status badge, task name, query count, elapsed time, health progress, and observed values.
+  - **Progress display** (`display`): Declare up to 4 result fields to project into the live widget, so a polled script can report progress — download percentage, item counts, transfer speed — without the user asking for a status check. Each entry names a field path plus an optional `label`, `total`, or `totalField`:
+
+    ```jsonc
+    {
+      "tool": "read",
+      "args": { "path": "/tmp/progress.json" },
+      "condition": { "field": "status", "equals": "done" },
+      "display": [
+        { "field": "downloaded", "label": "progress", "totalField": "totalBytes" },
+        { "field": "speed", "label": "speed" }
+      ]
+    }
+    ```
+
+    renders as `progress=530/1000 · speed=1.2MB/s`. `totalField` reads a sibling field and wins over a fixed `total`. Values are bounded to 80 characters, sensitive field paths (containing `key`, `token`, `secret`, `password`, …) render as `[REDACTED]`, and composite values collapse to `[object]` or `[array: N]`. A failed or field-less sample clears the segment rather than showing a stale reading. Omitting `display` leaves the widget exactly as it was.
   - On condition match, query failure, or timeout, a concise notification wakes the session. Raw response payloads stay in `monitor_status` to prevent context pollution.
 - **Branch & Lifecycle Isolation**: Branch switches, session changes, reloads, or shutdowns transition active monitors to `interrupted` without firing turn-waking messages into improper sessions.
 
@@ -127,10 +142,37 @@ When a task is pending and requires a later check, the agent calls `monitor_star
 
 ## Safety & Permissions
 
-- **Default-Deny Read Policy**: Non-shell tools must pass a strict read-only policy.
+- **Default-Deny Read Policy**: Non-shell tools must be provably read-only. A tool is admitted when it is a known read-only builtin, or when it declares `readOnlyHint: true` itself. Anything unproven is rejected.
+- **Annotations Survive the Adapter**: Some MCP adapters register a server's tools without forwarding its `annotations` payload, which would make an explicitly read-only tool look unproven. When that happens pi-monitor recovers the declaration from the adapter's on-disk cache. This is evidence only, never authority: it cannot lift a hard block below, and a cached `readOnlyHint: true` on a mutating tool name is still rejected.
+- **Hard Blocks Outrank Everything**: Forbidden gateways (`mcp`, `mcpScript`), MCP namespace proxies (`mcp__*`), `destructiveHint: true`, and mutating tool names are rejected before any annotation or trust rule is consulted. A mislabelled `readOnlyHint` therefore cannot admit a destructive tool, and trusting a proxy cannot hand the monitor every tool behind it.
 - **Shell Query Constraints**: `bash` and `hypa_shell` accept nonempty commands. System guidelines instruct the agent to execute only idempotent read-only status checks. Commands inherit the host's existing permission boundaries.
 - **Call Leases**: Scoped, one-use call leases allow seamless compatibility with external repeat guards and loop protection extensions.
 - **Memory-Only & Redaction**: Execution state lives in memory only. Retained audit logs are capped at 10 items per session with automated redaction of sensitive arguments.
+
+### Trusting a tool your host cannot vouch for
+
+Many MCP servers describe their tools loosely, or not at all, so the default deny keeps them out of reach. Rather than weakening the default for every tool, you can vouch for specific tools in a Markdown file, which keeps the justification next to the rule:
+
+```markdown
+# pi-monitor trust
+
+## Allow
+- `mail_list_*` — read-only listings; the server omits annotations
+- index_search
+
+## Deny
+- mail_get_emails_content
+```
+
+- **User level**: `~/.pi/agent/pi-monitor.md`, always read. Set `PI_MONITOR_TRUST_FILE` to keep the rules elsewhere.
+- **Project level**: `PI-MONITOR.md` at the project root, read **only** when the project is trusted, so an untrusted repository cannot grant itself monitoring access.
+- Patterns are globs: `*` matches any run of characters, `?` exactly one; matching is case-insensitive.
+- Only `-` list items under an `Allow`/`Deny` heading are rules. Everything else is documentation and is ignored, so the file can explain itself.
+- An explicit `Deny` beats an annotation. An explicit `Allow` rescues an unannotated tool. Neither can override a hard block above.
+
+A commented starting point lives at [`docs/trust-example.md`](docs/trust-example.md); copy it to `~/.pi/agent/pi-monitor.md` and edit the two lists.
+
+The cache fallback reads `~/.pi/agent/mcp-cache.json`; set `PI_MONITOR_MCP_CACHE` to point elsewhere.
 
 ---
 
