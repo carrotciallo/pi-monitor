@@ -6,7 +6,6 @@
 
 <p align="center">
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg" alt="Node.js version" /></a>
-  <a href="https://github.com/carrotciallo/pi-monitor/actions"><img src="https://img.shields.io/badge/tests-76%20passed%20%7C%2083%20total-success.svg" alt="Test Status" /></a>
   <a href="https://github.com/carrotciallo/pi-monitor/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" /></a>
   <a href="https://github.com/carrotciallo/pi-monitor"><img src="https://img.shields.io/badge/Pi%20Coding%20Agent-Extension-purple.svg" alt="Pi Extension" /></a>
 </p>
@@ -134,7 +133,7 @@ Agent 提交异步作业后，启动监控并设定条件，立即结束当前�
 
 ---
 
-## 本地开发与测试
+## 本地开发
 
 ```sh
 # 安装依赖
@@ -143,14 +142,9 @@ npm ci --include=dev
 # 静态类型检查
 npm run check
 
-# 执行完整自动化测试套件
-npm test
-
 # 验证发布包打包规范
 npm pack --dry-run
 ```
-
-CI 测试环境基于 Node.js 22 和 Node.js 24。运行测试套件时 83 项用例完备覆盖（76 项常规用例通过，7 项需外部 Guard 插件的环境用例安全跳过）。
 
 ---
 
