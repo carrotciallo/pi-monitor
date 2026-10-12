@@ -78,6 +78,44 @@ test("exact dedupe reuses an identical running monitor and reports reused:true",
   scheduler.pruneSession("dedupe");
 });
 
+test("a different display declaration never reuses a running monitor", () => {
+  const scheduler = new MonitorScheduler(async () => ({ content: "", isError: false }));
+  const ctx = ctxFor("display-dedupe");
+  const base = { intervalSeconds: 5, timeoutSeconds: 60 };
+
+  const first = scheduler.startOrReuseMonitor(
+    "display-dedupe", "job_status", { id: "42" }, { field: "state", equals: "done" },
+    { ...base, display: [{ field: "downloaded", label: "downloaded" }] }, ctx,
+  );
+  assert.equal(first.reused, false);
+
+  // Identical declaration (same field, label defaulted) still reuses.
+  const same = scheduler.startOrReuseMonitor(
+    "display-dedupe", "job_status", { id: "42" }, { field: "state", equals: "done" },
+    { ...base, display: [{ field: "downloaded", label: "downloaded" }] }, ctx,
+  );
+  assert.equal(same.reused, true);
+  assert.equal(same.record.id, first.record.id);
+
+  // A different projection is a different monitor: reusing would silently keep
+  // the old record's display and never show the newly declared field.
+  const different = scheduler.startOrReuseMonitor(
+    "display-dedupe", "job_status", { id: "42" }, { field: "state", equals: "done" },
+    { ...base, display: [{ field: "percent" }] }, ctx,
+  );
+  assert.equal(different.reused, false);
+  assert.notEqual(different.record.id, first.record.id);
+
+  // No display at all is distinct from any display.
+  const none = scheduler.startOrReuseMonitor(
+    "display-dedupe", "job_status", { id: "42" }, { field: "state", equals: "done" },
+    base, ctx,
+  );
+  assert.equal(none.reused, false);
+
+  scheduler.pruneSession("display-dedupe");
+});
+
 test("dedupe is scoped to the session and rejects non-canonical arguments", () => {
   const scheduler = new MonitorScheduler(async () => ({ content: "", isError: false }));
   const a = scheduler.startOrReuseMonitor("s-a", "read", { p: 1 }, { textContains: "x" }, {}, ctxFor("s-a"));

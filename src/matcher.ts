@@ -355,7 +355,7 @@ const SENSITIVE_WORDS = new Set([
   "auth", "authorization", "credential", "credentials", "apikey", "apisecret", "accesskey", "privatekey",
 ]);
 
-function isSensitiveField(path: string): boolean {
+export function isSensitiveField(path: string): boolean {
   const segments = path.replace(/\[(\w+)\]/g, ".$1").split(".").filter(Boolean);
   const words = segments.flatMap(segment =>
     segment
@@ -373,7 +373,7 @@ function isSensitiveField(path: string): boolean {
  * a placeholder so no nested object contents (which may include secrets the
  * field-path heuristic does not recognize) are ever rendered.
  */
-function compactValueString(value: unknown): string {
+export function compactValueString(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return `[array: ${value.length}]`;
   switch (typeof value) {

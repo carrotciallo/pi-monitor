@@ -75,6 +75,44 @@ test("the shell structuredContent envelope unwraps only for shell tools on succe
   );
 });
 
+test("a structured payload demoted to text by the MCP adapter is recovered exactly", () => {
+  const payload = { page: 1, total: 3, emails: [{ subject: "hello" }] };
+  const pretty = JSON.stringify(payload, null, 2);
+
+  // The adapter appends the marker and pretty-printed JSON after the text blocks.
+  const withText = '{"content":"ok"}' + "\n" + "structuredContent:\n" + pretty;
+  assert.deepEqual(resolveStructuredSource({ isError: false, content: withText, toolName: "mail_list_emails_metadata" }), {
+    value: payload,
+    kind: "mcp-structured",
+  });
+
+  // With no ordinary content block the marker leads the text.
+  assert.deepEqual(resolveStructuredSource({ isError: false, content: "structuredContent:\n" + pretty }), {
+    value: payload,
+    kind: "mcp-structured",
+  });
+});
+
+test("recovering a demoted payload stays strict and never mistakes a marker inside the payload", () => {
+  // A marker that does not start a line is not a delimiter.
+  assert.equal(resolveStructuredSource({ isError: false, content: 'note structuredContent:\n{"a":1}' }), undefined);
+  // A marker whose remainder is not intact JSON is rejected, not repaired.
+  assert.equal(resolveStructuredSource({ isError: false, content: 'structuredContent:\n{"total":' }), undefined);
+  // A truncation wrapper still wins over the marker.
+  assert.equal(
+    resolveStructuredSource({ isError: false, content: "structuredContent:\n{}\n[Output truncated: 5 lines]" }),
+    undefined,
+  );
+  // A malformed marker at offset 0 terminates instead of being re-found forever.
+  assert.equal(resolveStructuredSource({ isError: false, content: "structuredContent:\nnot json" }), undefined);
+  // When the payload itself contains a marker line, the real (rightmost) one wins.
+  const nested = { note: "structuredContent:\nfake", total: 2 };
+  assert.deepEqual(
+    resolveStructuredSource({ isError: false, content: "x\nstructuredContent:\n" + JSON.stringify(nested, null, 2) }),
+    { value: nested, kind: "mcp-structured" },
+  );
+});
+
 test("strict adaptation never performs fuzzy extraction", () => {
   // A JSON object embedded in surrounding text is not adapted.
   assert.equal(resolveStructuredSource({ isError: false, content: 'prefix {"a":1} suffix' }), undefined);

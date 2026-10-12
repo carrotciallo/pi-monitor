@@ -2,9 +2,19 @@ import { isAllowedShellQuery } from "./shell-policy.ts";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { validateCondition } from "./matcher.ts";
+import { normalizeDisplaySpecs } from "./display.ts";
+import { resolveToolAnnotations } from "./mcp-annotations.ts";
+import {
+  loadToolTrust,
+  matchesToolPatterns,
+  resolveProjectTrust,
+  userTrustFilePath,
+  type ToolTrust,
+} from "./tool-trust.ts";
 import type { MonitorScheduler } from "./scheduler.ts";
 import {
   MAX_CONTENT_LENGTH,
+  MAX_DISPLAY_FIELDS,
   type MonitorCondition,
   type MonitorRecord,
 } from "./types.ts";
@@ -36,10 +46,20 @@ const KNOWN_READ_TOOLS = new Set([
   "hypa_outline",
 ]);
 
+/**
+ * Decides whether `monitor_start` may poll `toolName` in the background.
+ *
+ * Order matters. The hard blocks (forbidden gateways, explicit
+ * `destructiveHint: true`, and mutating tool names) can never be overridden by
+ * annotations or by a user trust file. User rules sit between those blocks and
+ * the allow paths: an explicit Deny beats annotations, and an explicit Allow
+ * rescues a tool that is otherwise only unproven.
+ */
 export function isAllowedMonitorTool(
   toolName: string,
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean },
-  args?: Record<string, unknown>
+  args?: Record<string, unknown>,
+  trust?: ToolTrust
 ): boolean {
   if (!toolName || typeof toolName !== "string") {
     return false;
@@ -69,9 +89,10 @@ export function isAllowedMonitorTool(
     return false;
   }
 
-  // 4. Disallow mutating/dangerous verbs (delimited by _, ., -, or boundaries)
+  // 4. Disallow mutating/dangerous verbs (delimited by _, ., -, or boundaries).
+  // These stay hard-coded so a mislabelled readOnlyHint cannot admit them.
   if (
-    /(?:^|[._-])(?:write|edit|patch|replace|delete|remove|rm|kill|cancel|restart|deploy|create|update|modify|print|ast_grep_replace)(?:$|[._-])/i.test(
+    /(?:^|[._-])(?:write|edit|patch|replace|delete|remove|rm|kill|cancel|restart|deploy|create|update|modify|print|send|ast_grep_replace)(?:$|[._-])/i.test(
       toolName
     ) ||
     /(?:^|[._-])set_/i.test(toolName) ||
@@ -80,16 +101,26 @@ export function isAllowedMonitorTool(
     return false;
   }
 
-  // 5. Whitelist known safe read tools
+  // 5. Explicit user Deny, which beats every allow path below. Hard blocks
+  // above already rejected their tools, so a Deny here is never the only
+  // thing standing between the monitor and a destructive call.
+  if (trust && matchesToolPatterns(toolName, trust.deny)) {
+    return false;
+  }
+
+  // 6. Whitelist known safe read tools
   if (KNOWN_READ_TOOLS.has(toolName)) {
     return true;
   }
 
-  // 6. Explicit read-only annotations with query-like naming
-  if (
-    annotations?.readOnlyHint === true &&
-    /(?:status|query|inspect|get|fetch|list|info)/i.test(toolName)
-  ) {
+  // 7. An explicit read-only declaration is the strongest evidence a tool
+  // offers; a server that says so is trusted without name heuristics.
+  if (annotations?.readOnlyHint === true) {
+    return true;
+  }
+
+  // 8. Explicit user Allow, for a tool the host cannot prove read-only.
+  if (trust && matchesToolPatterns(toolName, trust.allow)) {
     return true;
   }
 
@@ -143,6 +174,14 @@ export function sanitizeRecord(record: MonitorRecord): Record<string, unknown> {
     args: safeArgs,
     lastResult: safeLastResult,
   };
+  // Display values are bounded and redacted at capture time; clean control
+  // characters again so a status dump is safe in any host.
+  if (Array.isArray(safeRecord.displayValues)) {
+    safeRecord.displayValues = (safeRecord.displayValues as Array<{ label: string; value: string }>).map(v => ({
+      label: cleanControlCharacters(String(v.label ?? "")),
+      value: cleanControlCharacters(String(v.value ?? "")),
+    }));
+  }
   // Health text is bounded and redacted at capture time; still clean control chars.
   if (safeRecord.lastErrorText) {
     safeRecord.lastErrorText = cleanControlCharacters(String(safeRecord.lastErrorText)).slice(0, 200);
@@ -188,6 +227,12 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
       maxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 10, description: "Backoff retries on transient execution errors (default 3)" })),
       consecutiveMatches: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000, description: "Require this many consecutive matching samples before completing (default 1)" })),
       stableForSeconds: Type.Optional(Type.Number({ minimum: 0, maximum: 604800, description: "Require the condition to stay matched this long before completing (default 0)" })),
+      display: Type.Optional(Type.Array(Type.Object({
+        field: Type.String({ minLength: 1, maxLength: 256, description: "Dot-separated result field path to show in the live widget, e.g. downloaded" }),
+        label: Type.Optional(Type.String({ maxLength: 60, description: "Label shown instead of the field path" })),
+        total: Type.Optional(Type.Number({ description: "Fixed total, rendering the value as value/total" })),
+        totalField: Type.Optional(Type.String({ maxLength: 256, description: "Sibling field path holding the total, rendering as value/total" })),
+      }), { maxItems: MAX_DISPLAY_FIELDS, description: `Up to ${MAX_DISPLAY_FIELDS} result fields projected into the live widget to show progress without a status check` })),
       description: Type.Optional(Type.String({ maxLength: 100, description: "Short task label" })),
     }),
     async execute(_id, params, _signal, _update, ctx: ExtensionToolContext) {
@@ -201,10 +246,28 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
         };
       }
 
-      if (!isAllowedMonitorTool(params.tool, targetTool.annotations, params.args ?? {})) {
+      const trust = loadToolTrust({
+        cwd: ctx.cwd,
+        projectTrusted: resolveProjectTrust(ctx),
+      });
+
+      // Pi drops MCP annotations on the direct path; recover the server's own
+      // declaration from the adapter cache so a read-only tool is not denied as
+      // unproven. This is evidence only: it cannot lift a hard block.
+      const annotations = resolveToolAnnotations(params.tool, targetTool.annotations);
+
+      if (!isAllowedMonitorTool(params.tool, annotations, params.args ?? {}, trust)) {
+        const isShell = params.tool === "bash" || params.tool === "hypa_shell";
+        const reason = isShell
+          ? `'${params.tool}' needs a nonempty 'command' argument to poll.`
+          : `'${params.tool}' is not a provably read-only tool.`;
+        const hint = isShell
+          ? "Pass { command: \"...\" } in args to select the query."
+          : "The server declares no readOnlyHint for it. Allow it by name under an \"## Allow\" heading in " +
+            `${trust.sources.length > 0 ? trust.sources.join(" or ") : userTrustFilePath()}.`;
         return {
-          content: [{ type: "text", text: `Cannot start monitor: '${params.tool}' requires a nonempty command (bash/hypa_shell) or trusted read-only eligibility; it cannot be used for background monitoring with these arguments` }],
-          details: { error: `Tool '${params.tool}' is not permitted for background monitoring` },
+          content: [{ type: "text", text: `Cannot start monitor: ${reason} It cannot be used for background monitoring with these arguments. ${hint}` }],
+          details: { error: `Tool '${params.tool}' is not permitted for background monitoring`, hint },
           isError: true,
         };
       }
@@ -215,6 +278,20 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
         const errorMsg = err instanceof Error ? err.message : String(err);
         return {
           content: [{ type: "text", text: `Cannot start monitor: invalid condition: ${errorMsg}` }],
+          details: { error: errorMsg },
+          isError: true,
+        };
+      }
+
+      // Validate the display declaration up front so a bad spec fails loudly
+      // instead of silently rendering nothing on every poll.
+      let display;
+      try {
+        display = normalizeDisplaySpecs(params.display);
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text", text: `Cannot start monitor: invalid display: ${errorMsg}` }],
           details: { error: errorMsg },
           isError: true,
         };
@@ -234,6 +311,7 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
             consecutiveMatches: params.consecutiveMatches,
             stableForSeconds: params.stableForSeconds,
             description: params.description,
+            display,
           },
           ctx
         );

@@ -116,6 +116,17 @@ export function formatObservedValue(record: MonitorRecord): string | undefined {
 }
 
 /**
+ * Renders the declared display projections as `label=value` segments, so a
+ * polled script can report progress in the widget. Values are bounded and
+ * redacted at capture time; this only joins them.
+ */
+export function formatDisplayValues(record: MonitorRecord): string | undefined {
+  const values = record.displayValues;
+  if (!values || values.length === 0) return undefined;
+  return values.map(v => `${v.label}=${v.value}`).join(" · ");
+}
+
+/**
  * Builds the lines displayed in Pi-Web above-editor widget.
  */
 export function formatWidgetLines(records: MonitorRecord[], now = Date.now()): string[] {
@@ -136,7 +147,8 @@ export function formatWidgetLines(records: MonitorRecord[], now = Date.now()): s
     const elapsed = formatElapsedTime(r.startedAt, r.completedAt ?? now);
     const health = formatHealthSuffix(r, now);
     const observed = formatObservedValue(r);
-    const details = [health, observed].filter(Boolean).join(" · ");
+    const display = formatDisplayValues(r);
+    const details = [health, observed, display].filter(Boolean).join(" · ");
     const suffix = details ? ` · ${details}` : "";
     return `${color}${status}${ANSI.reset} ${label} · ${r.attempts} checks · ${elapsed}${suffix}`;
   });

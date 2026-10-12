@@ -14,13 +14,17 @@
  * 3. Otherwise the text content is parsed as strict JSON, accepting only a body
  *    that is entirely JSON (after `trim()`), with no surrounding or trailing
  *    text at all.
+ * 4. The MCP adapter appends the server's payload to the text it returns
+ *    instead of forwarding it as `structuredContent`. It writes a marker line
+ *    followed by pretty-printed JSON, so the payload is still recovered
+ *    exactly, never by fuzzy extraction.
  *
  * There is no fragment scanning, brace balancing, or other fuzzy extraction.
  * Non-shell `structuredContent` objects are still used as-is, because that is
  * already host-provided structured data, not text to adapt.
  */
 
-export type StructuredSourceKind = "structured-content" | "shell-output" | "json-content";
+export type StructuredSourceKind = "structured-content" | "shell-output" | "json-content" | "mcp-structured";
 
 export interface StructuredSource {
   value: unknown;
@@ -77,6 +81,35 @@ export function strictParseJson(text: string): unknown {
 }
 
 /**
+ * The marker the MCP adapter writes before the structured payload it could not
+ * forward as `structuredContent`. It always occupies its own line, and the
+ * adapter joins it to the preceding text block with a newline.
+ */
+const MCP_STRUCTURED_MARKER = "structuredContent:\n";
+
+/**
+ * Recovers a structured payload the MCP adapter demoted to text. The adapter
+ * appends the marker last, so the rightmost marker is tried first; the search
+ * then walks leftward so a literal marker inside the payload itself cannot mask
+ * the real one. Only a marker that starts a line counts, and its remainder must
+ * parse as strict JSON, so nothing is ever extracted from partial data.
+ */
+export function resolveMcpStructuredContent(content: string): StructuredSource | undefined {
+  let before = content.length;
+  for (;;) {
+    const at = content.lastIndexOf(MCP_STRUCTURED_MARKER, before);
+    if (at < 0) return undefined;
+    if (at === 0 || content[at - 1] === "\n") {
+      const parsed = strictParseJson(content.slice(at + MCP_STRUCTURED_MARKER.length));
+      if (parsed !== undefined) return { value: parsed, kind: "mcp-structured" };
+    }
+    // A marker at offset 0 has nothing to its left; stop rather than re-find it.
+    if (at === 0) return undefined;
+    before = at - 1;
+  }
+}
+
+/**
  * Resolves the structured value for a result, or undefined when the result is
  * not structured under the strict rules above. Shell-envelope handling requires
  * an explicit known shell `toolName`; a missing or unknown name is never
@@ -109,5 +142,6 @@ export function resolveStructuredSource(result: ToolResultLike): StructuredSourc
   if (parsed !== undefined) {
     return { value: parsed, kind: "json-content" };
   }
-  return undefined;
+
+  return resolveMcpStructuredContent(content);
 }

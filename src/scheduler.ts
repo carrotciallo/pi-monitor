@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatCompletionNotification, formatInterruptionNotice, formatWidgetLines } from "./formatter.ts";
+import { observeDisplayValues } from "./display.ts";
 import { formatLostMonitorNotice } from "./lifecycle.ts";
 import { canonicalJson, matchesCondition, observeConditionValue } from "./matcher.ts";
 import {
@@ -23,6 +24,7 @@ import {
   type MonitorPersistEntry,
   type MonitorRecord,
   type MonitorStatus,
+  type DisplayFieldSpec,
   NOTIFICATION_CUSTOM_TYPE,
   WIDGET_KEY,
 } from "./types.ts";
@@ -295,10 +297,11 @@ export class MonitorScheduler {
     const stableForSeconds = clamp(
       options.stableForSeconds ?? DEFAULT_STABLE_FOR_SECONDS, 0, MAX_STABLE_FOR_SECONDS
     );
+    const display = options.display;
 
     let identity: string;
     try {
-      identity = canonicalJson({ tool, args, condition, intervalSec, timeoutSec, maxRetries, consecutiveMatches, stableForSeconds });
+      identity = canonicalJson({ tool, args, condition, display, intervalSec, timeoutSec, maxRetries, consecutiveMatches, stableForSeconds });
     } catch (err) {
       throw new Error(`Cannot start monitor: arguments are not canonical JSON (${err instanceof Error ? err.message : String(err)})`);
     }
@@ -312,6 +315,7 @@ export class MonitorScheduler {
           tool: existing.tool,
           args: existing.args,
           condition: existing.condition,
+          display: existing.display,
           intervalSec: existing.options.intervalSeconds,
           timeoutSec: existing.options.timeoutSeconds,
           maxRetries: existing.options.maxRetries,
@@ -352,6 +356,7 @@ export class MonitorScheduler {
         stableForSeconds,
         description: options.description,
       },
+      ...(display ? { display } : {}),
       status: "running",
       createdAt: now,
       startedAt: now,
@@ -602,6 +607,7 @@ export class MonitorScheduler {
         record.consecutiveMatches = 0;
         record.firstMatchAt = undefined;
         record.lastObservedValue = undefined;
+        record.displayValues = undefined;
         if (record.consecutiveErrors > record.options.maxRetries) {
           const errDetail = queryResult.errorText ? `: ${queryResult.errorText}` : "";
           this.finishRecord(record, "failed", `Consecutive errors (${record.consecutiveErrors}) exceeded retry limit${errDetail}`);
@@ -624,6 +630,10 @@ export class MonitorScheduler {
 
       // Evaluate match condition
       const match = matchesCondition(record.condition, queryResult);
+      // Project the declared display fields from the same successful sample. A
+      // field that disappeared clears the segment rather than leaving a stale
+      // reading, matching the observed-value semantics below.
+      record.displayValues = observeDisplayValues(record.display, queryResult);
       const observed = observeConditionValue(record.condition, queryResult);
       // Update or clear the observed value: a field that disappeared on a
       // successful sample must not leave a stale value on screen.

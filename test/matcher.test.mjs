@@ -114,6 +114,32 @@ test("matchesCondition: regex textMatches", () => {
   assert.equal(matchesCondition({ textMatches: "status\\s+FAILURE" }, result).matched, false);
 });
 
+test("matchesCondition: a demoted MCP payload still satisfies field conditions", () => {
+  // Mirrors what the MCP adapter actually delivers: the server's structured
+  // payload is appended to the text instead of being forwarded as
+  // structuredContent. Before recovery this failed every field condition with
+  // "result is not structured JSON", even though the data was right there.
+  const payload = { page: 1, total: 3, emails: [{ subject: "Apple Music" }] };
+  const result = {
+    isError: false,
+    toolName: "mail_list_emails_metadata",
+    // The inner block carries a decoy email_id that the real payload lacks.
+    content: JSON.stringify({ page: 1, total: 3, emails: [{ email_id: "999" }] }, null, 2) +
+      "\nstructuredContent:\n" + JSON.stringify(payload, null, 2),
+  };
+
+  assert.equal(matchesCondition({ field: "total", greaterThanOrEqual: 1 }, result).matched, true);
+  assert.equal(matchesCondition({ field: "total", equals: 3 }, result).matched, true);
+  assert.equal(matchesCondition({ field: "emails.0.subject", contains: "Apple Music" }, result).matched, true);
+
+  // The inner text block must not be mistaken for the payload: this decoy only
+  // exists in the leading block, so finding it would mean the wrong value won.
+  assert.equal(matchesCondition({ field: "emails.0.email_id", equals: "999" }, result).matched, false);
+  // Genuinely absent fields still fail, and thresholds still bind.
+  assert.equal(matchesCondition({ field: "total", greaterThanOrEqual: 99 }, result).matched, false);
+  assert.equal(matchesCondition({ field: "missing", equals: 1 }, result).matched, false);
+});
+
 test("matchesCondition: isError = true is NEVER a match", () => {
   const errorResult = {
     isError: true,

@@ -139,6 +139,68 @@ test("scheduler single in-flight lock prevents overlapping queries", async () =>
   scheduler.pruneSession("s-lock");
 });
 
+test("scheduler projects display values and clears them when a query fails", async () => {
+  const mockAPI = createMockAPI();
+  let call = 0;
+
+  // First sample succeeds with progress, second fails: the failure must clear
+  // the projected value so a stale reading never looks current.
+  const toolExecutor = async () => {
+    call++;
+    if (call === 1) {
+      return { content: "", isError: false, structuredContent: { downloaded: 530, totalBytes: 1000 } };
+    }
+    return { content: "", isError: true, errorText: "connection reset" };
+  };
+
+  const scheduler = new MonitorScheduler(toolExecutor, mockAPI.api);
+  const { ctx } = createMockContext("s-display");
+
+  const monitor = scheduler.startMonitor(
+    "s-display",
+    "job_status",
+    { id: "7" },
+    { textContains: "done" },
+    {
+      intervalSeconds: 2,
+      maxRetries: 5,
+      display: [{ field: "downloaded", label: "progress", totalField: "totalBytes" }],
+    },
+    ctx
+  );
+
+  // Initial check at 500ms succeeds -> projection present.
+  await new Promise(r => setTimeout(r, 900));
+  assert.deepEqual(monitor.displayValues, [{ label: "progress", value: "530/1000" }]);
+
+  // Next poll at +2s fails -> projection cleared, run continues under maxRetries.
+  await new Promise(r => setTimeout(r, 2200));
+  assert.equal(monitor.status, "running");
+  assert.equal(monitor.displayValues, undefined);
+
+  scheduler.pruneSession("s-display");
+});
+
+test("a monitor without display renders no projection", async () => {
+  const mockAPI = createMockAPI();
+  const toolExecutor = async () => ({
+    content: "", isError: false, structuredContent: { downloaded: 530 },
+  });
+  const scheduler = new MonitorScheduler(toolExecutor, mockAPI.api);
+  const { ctx } = createMockContext("s-nodisplay");
+
+  const monitor = scheduler.startMonitor(
+    "s-nodisplay", "job_status", {}, { textContains: "done" },
+    { intervalSeconds: 2 }, ctx,
+  );
+
+  await new Promise(r => setTimeout(r, 900));
+  assert.equal(monitor.displayValues, undefined);
+  assert.equal(monitor.display, undefined);
+
+  scheduler.pruneSession("s-nodisplay");
+});
+
 test("scheduler handles transient errors with backoff and fails when maxRetries exceeded", async () => {
   const mockAPI = createMockAPI();
   let calls = 0;

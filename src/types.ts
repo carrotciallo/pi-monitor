@@ -36,6 +36,8 @@ export interface MonitorOptions extends StabilityOptions {
   timeoutSeconds?: number;
   maxRetries?: number;
   description?: string;
+  /** Static result-field projections for the live widget. */
+  display?: DisplayFieldSpec[];
 }
 
 /** Bounded, redacted observation of the condition's relevant field for the UI. */
@@ -43,6 +45,29 @@ export interface ObservedValue {
   field: string;
   value: string;
   matched: boolean;
+}
+
+/**
+ * Declares one result field to project into the live widget, so a polled script
+ * can report progress (download percentage, item counts) without the user
+ * asking. Specs are static: they name paths, never values, so they are safe to
+ * include in a monitor's reuse identity and are never persisted with results.
+ */
+export interface DisplayFieldSpec {
+  /** Dot-separated result field path, e.g. `downloaded` or `stats.percent`. */
+  field: string;
+  /** Label shown in place of the field path. Defaults to the field path. */
+  label?: string;
+  /** Fixed total, rendering the value as `value/total`. */
+  total?: number;
+  /** Sibling field path holding the total, rendering as `value/total`. */
+  totalField?: string;
+}
+
+/** A resolved, bounded, redacted display value ready for rendering. */
+export interface DisplayValue {
+  label: string;
+  value: string;
 }
 
 export interface MonitorRecord {
@@ -77,6 +102,10 @@ export interface MonitorRecord {
   consecutiveMatches: number;
   firstMatchAt?: number;
   lastObservedValue?: ObservedValue;
+  /** Static projection specs declared at start; part of the reuse identity. */
+  display?: DisplayFieldSpec[];
+  /** Runtime projections of the latest successful sample; never persisted. */
+  displayValues?: DisplayValue[];
   interruptedBy?: string;
   lastResult?: {
     isError: boolean;
@@ -114,6 +143,7 @@ export interface MonitorPersistEntry {
   interruptedBy?: string;
 }
 
+export const MAX_DISPLAY_FIELDS = 4;
 export const MAX_CONCURRENT_MONITORS = 5;
 export const MAX_STORED_RECORDS_PER_SESSION = 10;
 export const MAX_CONTENT_LENGTH = 4096;
