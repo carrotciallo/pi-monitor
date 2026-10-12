@@ -1,6 +1,10 @@
 # pi-monitor
 
 <p align="center">
+  <img src="docs/promo-poster.png" alt="pi-monitor" width="100%" />
+</p>
+
+<p align="center">
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg" alt="Node.js version" /></a>
   <a href="https://github.com/carrotciallo/pi-monitor/actions"><img src="https://img.shields.io/badge/tests-76%20passed%20%7C%2083%20total-success.svg" alt="Test Status" /></a>
   <a href="https://github.com/carrotciallo/pi-monitor/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" /></a>
@@ -31,10 +35,6 @@ When managing long-running background tasks (e.g. multi-step builds, long CI pip
 ---
 
 ## Architecture Overview
-
-![Background monitoring flow](docs/monitor-flow.svg)
-
-> 🎬 **Promo Video & Showcase**: Check out the [Interactive Video Player](docs/promo-video/index.html) or watch the [1080p promo video](docs/promo-video/pi-monitor-promo-subtitled.mp4) (includes bilingual subtitles & storyboards).
 
 **Pi-Web is supported, but not required.**  
 The extension relies on native Pi host extension APIs rather than a web-only backend. Compatible terminal hosts display a compact live status widget; background queries and session resume work equally well in headless environments.

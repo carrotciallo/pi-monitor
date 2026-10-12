@@ -8,3 +8,9 @@ dist/
 *.tsbuildinfo
 .DS_Store
 LEASE-VERIFICATION.md
+
+# Promo video: large, regenerable build artefacts (1.3G of intermediate
+# frames plus the encoded MP4s). The pipeline in docs/promo-video/ rebuilds
+# every file from source; nothing here needs to be version-controlled.
+docs/promo-video/
+.quarantine/

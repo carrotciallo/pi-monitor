@@ -1,6 +1,10 @@
 # pi-monitor
 
 <p align="center">
+  <img src="docs/promo-poster.png" alt="pi-monitor" width="100%" />
+</p>
+
+<p align="center">
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg" alt="Node.js version" /></a>
   <a href="https://github.com/carrotciallo/pi-monitor/actions"><img src="https://img.shields.io/badge/tests-76%20passed%20%7C%2083%20total-success.svg" alt="Test Status" /></a>
   <a href="https://github.com/carrotciallo/pi-monitor/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" /></a>
@@ -31,10 +35,6 @@
 ---
 
 ## 流程概览
-
-![后台监控流程](docs/monitor-flow.svg)
-
-> 🎬 **宣传视频与演示**：可在浏览器直接打开 [可交互视频演示](docs/promo-video/index.html)，或播放 [1080p 宣传短片](docs/promo-video/pi-monitor-promo-subtitled.mp4)（含中英双语分镜与字幕）。
 
 **支持 Pi-Web，但不依赖 Pi-Web。**  
 插件使用 Pi 宿主原生扩展 API，无 Web 专属后端依赖。在兼容的终端宿主中可实时显示紧凑字符状态面板；无 UI 宿主亦能完全在后台可靠执行查询与唤醒。
