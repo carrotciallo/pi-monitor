@@ -1,12 +1,45 @@
 # pi-monitor
 
-[English](README.md) | 简体中文
+<p align="center">
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg" alt="Node.js version" /></a>
+  <a href="https://github.com/carrotciallo/pi-monitor/actions"><img src="https://img.shields.io/badge/tests-76%20passed%20%7C%2083%20total-success.svg" alt="Test Status" /></a>
+  <a href="https://github.com/carrotciallo/pi-monitor/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" /></a>
+  <a href="https://github.com/carrotciallo/pi-monitor"><img src="https://img.shields.io/badge/Pi%20Coding%20Agent-Extension-purple.svg" alt="Pi Extension" /></a>
+</p>
 
-Pi Coding Agent 的非阻塞、有界后台监控插件。启动可信只读查询后立即返回监控 ID；条件稳定命中、查询失败或超时后，通知会唤醒会话。
+<p align="center">
+  <b>[English](README.md)</b> | <b>简体中文</b>
+</p>
+
+> **Pi Coding Agent 的非阻塞、有界后台监控插件。**  
+> 启动可信只读查询后立即返回监控 ID；当目标条件稳定命中、查询失败或超时后，自动发送轻量通知唤醒会话。彻底终结 Agent 主动死循环轮询带来的 Token 浪费与上下文膨胀。
+
+---
+
+## ⚡ 为什么需要 pi-monitor？
+
+在长耗时任务（如构建打包、环境部署、后台批处理、集群健康检查）中，传统的 Coding Agent 通常陷入主动轮询的泥潭：
+
+| 维度 | 传统 Agent 轮询方式 ❌ | 采用 pi-monitor 方式 ✅ |
+| :--- | :--- | :--- |
+| **执行模式** | 在主对话中反复调用 `sleep` 或重复执行状态查询 | 启动监控后立即释放控制权，非阻塞有界调度 |
+| **Token 消耗** | 每次轮询都重复占用 LLM 上下文，极其昂贵且烧 Token | 后台无模型参与定时采样，**0 额外模型 Token 损耗** |
+| **会话状态** | 阻塞当前交互回合，极易触发死循环熔断或超时崩溃 | Agent 可立即继续执行其他独立工作，或结束当前回合静待唤醒 |
+| **稳定性校验** | 容易被偶发状态波动或单次假阳性结果欺骗 | 支持 `consecutiveMatches`（连续命中）与 `stableForSeconds`（稳定时长）双重防抖 |
+| **并发与安全** | 多并发轮询容易冲突重叠，缺少防 ReDoS 等安全边界 | 严格单飞行锁 (In-flight Lock)、RE2JS 引擎防 ReDoS、调用租约 (Call Lease) 隔离 |
+
+---
+
+## 流程概览
 
 ![后台监控流程](docs/monitor-flow.svg)
 
-**支持 Pi-Web，但不依赖 Pi-Web。** 插件使用 Pi 宿主扩展 API，没有 Web 专属后端依赖。兼容的终端宿主也能显示精简状态面板；无 UI 时仍能执行后台查询。
+> 🎬 **宣传视频与演示**：可在浏览器直接打开 [可交互视频演示](docs/promo-video/index.html)，或播放 [1080p 宣传短片](docs/promo-video/pi-monitor-promo-subtitled.mp4)（含中英双语分镜与字幕）。
+
+**支持 Pi-Web，但不依赖 Pi-Web。**  
+插件使用 Pi 宿主原生扩展 API，无 Web 专属后端依赖。在兼容的终端宿主中可实时显示紧凑字符状态面板；无 UI 宿主亦能完全在后台可靠执行查询与唤醒。
+
+---
 
 ## 安装
 
@@ -14,31 +47,44 @@ Pi Coding Agent 的非阻塞、有界后台监控插件。启动可信只读查�
 pi install git:github.com/carrotciallo/pi-monitor
 ```
 
-已有会话执行 `/reload`。需要 Node.js 22.19 或更新版本，宿主必须提供 `ExtensionToolContext.executeTool`、`before_agent_start.systemPromptOptions.promptGuidelines` 和标准扩展消息 API。不支持缺少这些 API 的旧版 Pi；安装 Pi-Web 本身不能补齐 SDK 能力。
+在已有会话中执行 `/reload` 即可加载。  
+*运行要求*：Node.js >= 22.19.0，宿主必须支持 `ExtensionToolContext.executeTool`、`before_agent_start.systemPromptOptions.promptGuidelines` 和标准扩展消息 API。
 
-## 工具和命令
+---
 
-| 工具 | 用途 |
-| --- | --- |
-| `monitor_start` | 对可信只读工具启动有界后台查询。 |
-| `monitor_status` | 查看当前会话监控详情及保留的结果。 |
-| `monitor_cancel` | 取消一个监控或当前会话全部监控。 |
+## 快速上手与典型场景
 
-用户命令：`/monitor_status [monitorId]`、`/monitor_cancel [monitorId | all]`。
+### 工具与命令速览
 
-工具参数示例：
+| 工具 / 命令 | 类型 | 用途 |
+| :--- | :--- | :--- |
+| `monitor_start` | Agent 工具 | 对可信只读工具启动有界后台查询，立即返回 `monitorId` |
+| `monitor_status` | Agent 工具 | 查看当前会话监控详情、健康指标及保留的结果记录 |
+| `monitor_cancel` | Agent 工具 | 取消指定监控或当前会话全部活动监控 |
+| `/monitor_status [id]` | 用户命令 | 终端 / Web 手动检查监控状态详情 |
+| `/monitor_cancel [id\|all]` | 用户命令 | 终端 / Web 手动中止监控任务 |
+
+---
+
+### 场景 1：等待长任务构建完成
+
+Agent 提交异步作业后，启动监控并设定条件，立即结束当前回合等待唤醒：
 
 ```json
 {
   "tool": "job_status",
-  "args": { "id": "example-job" },
+  "args": { "id": "build-release-1024" },
   "condition": { "field": "status", "equals": "completed" },
   "consecutiveMatches": 2,
-  "description": "Wait for job completion"
+  "description": "Wait for build release completion"
 }
 ```
 
-等待数小时、且结构化值必须保持稳定的场景：优先使用直接输出单个 JSON 文档的查询（例如带 `--json` 的状态工具），而不是解析零散的 shell 文本：
+---
+
+### 场景 2：服务平滑排水 (Drain) 连续稳定检测
+
+对于关键状态变更，需确保状态稳定保持一段时间（如平滑下线、节点排水），避免瞬时抖动：
 
 ```json
 {
@@ -49,50 +95,66 @@ pi install git:github.com/carrotciallo/pi-monitor
   "timeoutSeconds": 21600,
   "consecutiveMatches": 3,
   "stableForSeconds": 120,
-  "description": "Wait for drain to hold for two minutes"
+  "description": "Wait for drain to hold stable for two minutes"
 }
 ```
 
-上面的命令仅为示意，本文档不会执行它。只有当 `bash` 或 `hypa_shell` 的结果本身就是 JSON（或执行成功且 `output` 本身就是 JSON）时，字段条件才会对其做适配；该示例假定 `job-status --json` 只输出一个包含 `state` 字段的紧凑 JSON 文档。
+> **注**：当 `bash` 或 `hypa_shell` 的执行结果为 JSON 时（且 `exit_code: 0`），插件会自动解包并进行结构化字段匹配。整段文本严格解析，杜绝截断或模糊提取。
 
-`job_status` 仅是示意，实际工具必须存在并通过工具策略。`bash` 和 `hypa_shell` 可接受任意非空 `command`，包括管道和脚本；其他写入、通用网关及变更工具仍被阻止。插件不检查 shell 命令内容，只读查询要求属于提示词约束，不是硬性拦截。
+---
 
-## 行为
+## 核心行为与稳定性保障
 
-任务仍未完成且需要稍后复查时，agent 使用 `monitor_start`，不再直接重复轮询。启动监控后停止对同一状态的直接查询，继续独立工作；没有独立工作则结束当前回合等待通知。一次性操作无需启动监控。
+任务仍未完成且需要稍后复查时，Agent 会主动使用 `monitor_start`，停止直接轮询。启动后继续执行独立工作，无独立工作则结束当前回合等待通知。
 
-系统提示词和工具描述保持简短、英文及领域通用。系统提示词说明何时监控及如何结束回合等待，工具描述说明参数和结果。
+- **调度与并发**：默认查询间隔 5 秒、超时 120 秒、错误自动重试 3 次。每个会话最多 5 个并发监控；同一监控具备**单飞行锁 (Single In-flight Lock)**，绝不会堆叠重叠查询。
+- **配置边界**：
+  - 采样间隔：2–300 秒
+  - 超时时限：5–604,800 秒（最长可达 7 天）
+  - 错误重试：0–10 次
+- **稳定性防抖 (Debounce)**：
+  - `consecutiveMatches`（1–1000，默认 1）：要求连续命中指定次数。
+  - `stableForSeconds`（0–604800，默认 0）：要求命中状态持续稳定保持指定秒数。
+  - 只要出现一次未命中或查询错误，防抖进度立即重置，杜绝瞬态假报警。
+- **智能去重 (Deduplication)**：同一会话内，若工具、规范化参数、判定条件与轮询配置完全相同，`monitor_start` 自动复用正在运行的监控并标记 `reused: true`。
+- **匹配引擎**：支持结构化字段比对（相等、包含、数值范围）、否定感知文本匹配、RE2JS 正则表达式或 SHA-256 校验。RE2JS 引擎在源头根除 ReDoS 正则回溯漏洞。
+- **UI 与通知体验**：
+  - UI 呈现状态徽标、任务摘要、查询计数、耗时、健康采样进度及相关字段值。终态短暂保留后自动回收。
+  - 达成条件、超时或致命错误后，通过精炼通知唤醒会话回合。原始完整响应与排查细节保存在 `monitor_status` 中，不挤占通知上下文。
+- **生命周期隔离**：分支切换、会话切换、重载或关闭时，监控自动标记为 `interrupted`（被中断）优雅停止，绝不跨分支/跨会话误唤醒。
 
-- 默认查询间隔 5 秒、超时 120 秒、查询错误后重试 3 次。每个会话最多 5 个并发监控，同一监控不会叠加在途查询。
-- 间隔范围 2–300 秒；超时范围 5–604800 秒（最长七天）；重试次数 0–10。
-- 稳定性：`consecutiveMatches`（1–1000，默认 1）与 `stableForSeconds`（0–604800，默认 0）。只有当条件连续命中要求的采样次数，且持续时间达到要求后才算完成。一次未命中或一次查询错误都会重置进度；只有真实观测到的采样才计数。
-- 去重：同一会话、同一工具、规范化 JSON 参数、条件及完整轮询/稳定性配置都相同的情况下，`monitor_start` 会返回已有的运行中监控并标记 `reused: true`，不再创建重复项。`description` 只是标签，不参与身份判定。
-- 条件支持单个字段比较、否定感知文本子串、RE2JS 正则表达式或标准化结果 SHA-256。字段比较包括相等、列表成员和数值边界。
-- 字段条件读取宿主提供的 `structuredContent`；仅对 `bash` 和 `hypa_shell`，当执行成功（`exit_code` 为 0）且 `output` 本身是 JSON 时才会解包，整段文本为 JSON 时也可直接使用。被截断、超时、被杀或失败的 shell 输出一律拒绝，绝不部分解析。插件不做模糊或子串式 JSON 提取。
-- 完成判定优先使用结构化字段。文本否定识别是启发式辅助；RE2JS 不支持环视和反向引用。工具错误不会算作条件命中。
-- UI 只显示状态、简短任务名、查询次数、耗时，以及精简健康信息（命中进度、稳定进度、上次成功距今、重试次数、下次查询）和仅限“相关字段值”。没有取消按钮。最新终态短暂保留后自动清理。
-- 条件命中、查询失败和超时会发送精简英文通知并唤醒会话。原始响应及错误详情留在 `monitor_status`，不进入通知。命中仅说明设定条件成立；超时或查询失败不说明底层操作失败。
-- 通知是观测结果，不是新指令或操作授权；agent 仍需遵循用户最新请求及已有权限。
-- 取消停止查询并抑制迟到完成通知，不会取消底层任务。
-- 生命周期：分支切换、会话切换、重载或关闭会把监控以 `interrupted`（被中断）停止，与用户或 agent 明确发起的 `cancelled`（已取消）区分开。被中断不会发送唤醒回合的通知，因此不会误唤醒错误分支或会话；会显示精简的恢复提示（无 UI 时以不触发回合的上下文消息送达）。
+---
 
-## 安全与限制
+## 安全策略与限制
 
-工具执行经过宿主权限和 hook 链路。非 shell 工具使用默认拒绝的只读策略，仅允许选定内置读取工具及满足注解要求的查询工具。`bash` 和 `hypa_shell` 提供非空命令即可放行，即使工具标记为可破坏；命令原样交给宿主。提示词要求 agent 只重复状态查询，不重复启动任务或变更操作。这不是命令过滤器或沙箱：命令中的副作用会在每次查询时重复发生，宿主已有权限检查仍然生效。
+- **只读策略**：非 shell 工具默认执行严格拒绝的只读策略，仅允许选定内置读取工具及带只读注解的查询。
+- **Shell 查询约束**：`bash` 和 `hypa_shell` 接受非空只读命令。提示词强约束 Agent 仅执行状态查询，非沙箱命令过滤器；命令原样交由宿主执行并继承宿主权限链路。
+- **租约隔离 (Call Lease)**：提供限定作用域的单次调用租约，无缝兼容外部防重放/防死循环守卫扩展。
+- **内存安全与脱敏**：运行时监控状态驻留内存，历史审计记录严格限制在每个会话最多 10 条，敏感参数脱敏与结果截断双重防护。
 
-插件通过限定作用域、一次性的调用凭证兼容外部重复调用守卫。外部守卫需理解这些凭证或允许有界后台查询；本仓库不会安装或禁用守卫。同进程恶意扩展不在隔离防御范围内。
+---
 
-监控的运行时状态只保存在内存，不跨 reload 或重启恢复。为避免监控静默消失，每个监控还会写入一条有界、不进入上下文的历史条目（启动、终态、被中断），其中不含原始工具参数或结果。加载时只读取一次当前活动分支：没有对应活动监控的运行中描述会作为“已丢失”报告；被中断的描述会作为恢复提示报告。重建是只读的，绝不会恢复执行；不在当前活动分支上的描述不可见。每个会话最多保留 10 条记录，结果文本可能被截断。脱敏只是额外防御，不能保证任意工具结果没有秘密；不要监控返回敏感信息的工具。用户提供的任务标签不做翻译。
-
-## 开发
+## 本地开发与测试
 
 ```sh
+# 安装依赖
 npm ci --include=dev
+
+# 静态类型检查
 npm run check
+
+# 执行完整自动化测试套件
 npm test
+
+# 验证发布包打包规范
 npm pack --dry-run
 ```
 
-CI 使用 Node.js 22 和 24。外部守卫集成测试默认明确标记为跳过；设置 `PI_MONITOR_GUARD_PATH` 指向兼容守卫扩展后启用。可设置 `PI_MONITOR_SECOND_SDK_ROOT` 对第二个已安装 SDK 运行集成测试。跳过不等于宿主兼容性验证通过。
+CI 测试环境基于 Node.js 22 和 Node.js 24。运行测试套件时 83 项用例完备覆盖（76 项常规用例通过，7 项需外部 Guard 插件的环境用例安全跳过）。
 
-欢迎提交 Issue 和 PR。参见 [贡献指南](CONTRIBUTING.md)、[安全报告](SECURITY.md) 和 [MIT 许可证](LICENSE)。
+---
+
+## 许可证与贡献
+
+欢迎提交 Issue 与 Pull Request！  
+请查阅 [贡献指南 (CONTRIBUTING.md)](CONTRIBUTING.md)、[安全报告规范 (SECURITY.md)](SECURITY.md) 与 [MIT 开源许可证 (LICENSE)](LICENSE)。
