@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <b>English</b> | <b>[简体中文](README.zh-CN.md)</b>
+  <b>English</b> | <b><a href="README.zh-CN.md">简体中文</a></b>
 </p>
 
 > **Nonblocking, bounded background monitoring for Pi Coding Agent.**  

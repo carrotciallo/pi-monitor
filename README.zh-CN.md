@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <b>[English](README.md)</b> | <b>简体中文</b>
+  <b><a href="README.md">English</a></b> | <b>简体中文</b>
 </p>
 
 > **Pi Coding Agent 的非阻塞、有界后台监控插件。**  
