@@ -6,7 +6,7 @@
   "homepage": "https://github.com/carrotciallo/pi-monitor#readme",
   "bugs": { "url": "https://github.com/carrotciallo/pi-monitor/issues" },
   "engines": { "node": ">=22.19.0" },
-  "files": ["src", "docs", "README.md", "README.zh-CN.md", "LICENSE"],
+  "files": ["src", "docs/monitor-flow.svg", "docs/promo-poster.png", "docs/trust-example.md", "README.md", "README.zh-CN.md", "LICENSE"],
   "type": "module",
   "description": "Nonblocking read-only background monitoring for Pi Coding Agent",
   "keywords": [
