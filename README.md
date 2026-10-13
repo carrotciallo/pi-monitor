@@ -1,7 +1,7 @@
 # pi-monitor
 
 <p align="center">
-  <img src="docs/promo-poster.png" alt="pi-monitor" width="100%" />
+  <img src="docs/promo-poster.webp" alt="pi-monitor" width="100%" />
 </p>
 
 <p align="center">
@@ -41,6 +41,12 @@ The extension relies on native Pi host extension APIs rather than a web-only bac
 ---
 
 ## Installation
+
+```sh
+pi install npm:@carrotciallo/pi-monitor
+```
+
+Or install straight from the repository:
 
 ```sh
 pi install git:github.com/carrotciallo/pi-monitor

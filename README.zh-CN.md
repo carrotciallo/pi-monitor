@@ -1,7 +1,7 @@
 # pi-monitor
 
 <p align="center">
-  <img src="docs/promo-poster.png" alt="pi-monitor" width="100%" />
+  <img src="docs/promo-poster.webp" alt="pi-monitor" width="100%" />
 </p>
 
 <p align="center">
@@ -41,6 +41,12 @@
 ---
 
 ## 安装
+
+```sh
+pi install npm:@carrotciallo/pi-monitor
+```
+
+也可直接从仓库安装：
 
 ```sh
 pi install git:github.com/carrotciallo/pi-monitor
