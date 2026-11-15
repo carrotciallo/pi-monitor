@@ -1,7 +1,7 @@
 import { RE2JS } from "re2js";
 import { createHash } from "node:crypto";
 import { resolveStructuredSource } from "./shell-json.ts";
-import type { MatchEvaluationResult, MonitorCondition, ObservedValue } from "./types.ts";
+import { MAX_SAMPLE_LENGTH, type MatchEvaluationResult, type MonitorCondition, type ObservedValue } from "./types.ts";
 
 const VALID_FIELD_OPERATORS = [
   "equals",
@@ -194,6 +194,23 @@ export function computeSha256(val: unknown): string {
   return createHash("sha256").update(canonicalJson(val)).digest("hex");
 }
 
+export interface MonitorSample {
+  isError: boolean;
+  content: string;
+  structuredContent?: unknown;
+  toolName?: string;
+}
+
+/** Reject unsafe or oversized samples before matching AND UI projection. */
+export function validateMonitorSample(result: MonitorSample): void {
+  if (typeof result.content !== "string" || result.content.length > MAX_SAMPLE_LENGTH) {
+    throw new Error(`Monitor sample exceeds text budget (${MAX_SAMPLE_LENGTH} characters) or is not text`);
+  }
+  if (result.structuredContent !== undefined) canonicalJson(result.structuredContent);
+  const source = resolveStructuredSource(result);
+  if (source) canonicalJson(source.value);
+}
+
 /**
  * Evaluates whether a tool result satisfies the monitor condition.
  */
@@ -205,7 +222,7 @@ export function matchesCondition(
     // Validate condition and any host structured value BEFORE adaptation, so
     // exotic accessors are rejected by canonicalJson rather than being executed.
     canonicalJson(condition);
-    if (result.structuredContent !== undefined) canonicalJson(result.structuredContent);
+    validateMonitorSample(result);
     return evaluateCondition(condition, result);
   } catch (error) {
     return { matched: false, reason: `Invalid monitor input: ${error instanceof Error ? error.message : String(error)}` };
@@ -228,8 +245,8 @@ function evaluateCondition(
     return { matched: false, reason: `Invalid condition: ${err instanceof Error ? err.message : String(err)}` };
   }
 
-  // Truncate candidate content for safety
-  const safeContent = (result.content ?? "").slice(0, 65536);
+  // Evaluate the complete validated sample, not the retained display summary.
+  const safeContent = result.content;
 
   // 1. Field condition (structured)
   if ("field" in condition) {

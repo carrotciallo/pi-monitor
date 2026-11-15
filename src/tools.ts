@@ -2,8 +2,10 @@ import { isAllowedShellQuery } from "./shell-policy.ts";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { validateCondition } from "./matcher.ts";
+import { sanitizeValue } from "./privacy.ts";
+export { sanitizeValue } from "./privacy.ts";
 import { normalizeDisplaySpecs } from "./display.ts";
-import { resolveToolAnnotations } from "./mcp-annotations.ts";
+import { monitorToolEvidence } from "./mcp-identity.ts";
 import {
   loadToolTrust,
   matchesToolPatterns,
@@ -59,15 +61,23 @@ export function isAllowedMonitorTool(
   toolName: string,
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean },
   args?: Record<string, unknown>,
-  trust?: ToolTrust
+  trust?: ToolTrust,
+  concreteMcp = false
 ): boolean {
   if (!toolName || typeof toolName !== "string") {
+    return false;
+  }
+
+  // Explicit Deny applies even to the documented shell exception.
+  if (trust && matchesToolPatterns(toolName, trust.deny)) {
     return false;
   }
 
   if (toolName === "bash" || toolName === "hypa_shell") {
     return args !== undefined && isAllowedShellQuery(args);
   }
+
+  if (annotations?.destructiveHint === true) return false;
 
   // 1. Exact forbidden tools
   if (FORBIDDEN_EXACT.has(toolName)) {
@@ -78,14 +88,9 @@ export function isAllowedMonitorTool(
   if (
     toolName.startsWith("monitor_") ||
     toolName === "agent_wait_policy" ||
-    toolName.startsWith("mcp_") ||
+    (toolName.startsWith("mcp_") && !concreteMcp) ||
     toolName.startsWith("mcpScript_")
   ) {
-    return false;
-  }
-
-  // 3. Disallow explicitly destructive tools
-  if (annotations?.destructiveHint === true) {
     return false;
   }
 
@@ -98,13 +103,6 @@ export function isAllowedMonitorTool(
     /(?:^|[._-])set_/i.test(toolName) ||
     /print_3mf/i.test(toolName)
   ) {
-    return false;
-  }
-
-  // 5. Explicit user Deny, which beats every allow path below. Hard blocks
-  // above already rejected their tools, so a Deny here is never the only
-  // thing standing between the monitor and a destructive call.
-  if (trust && matchesToolPatterns(toolName, trust.deny)) {
     return false;
   }
 
@@ -126,25 +124,6 @@ export function isAllowedMonitorTool(
 
   // Default-Deny: Reject all other unknown or unverified tools
   return false;
-}
-
-export function sanitizeValue(key: string, val: unknown): unknown {
-  if (
-    /^(?:.*[._-])?(?:key|token|secret|password|auth|authorization|credential|api_key|apikey|pass)(?:[._-].*)?$/i.test(
-      key
-    )
-  ) {
-    return "[REDACTED]";
-  }
-  if (Array.isArray(val)) {
-    return val.map((item, idx) => sanitizeValue(String(idx), item));
-  }
-  if (val !== null && typeof val === "object") {
-    return Object.fromEntries(
-      Object.entries(val).map(([k, v]) => [k, sanitizeValue(k, v)])
-    );
-  }
-  return val;
 }
 
 export function cleanControlCharacters(text: string): string {
@@ -251,20 +230,31 @@ export function registerMonitorTools(pi: ExtensionAPI, scheduler: MonitorSchedul
         projectTrusted: resolveProjectTrust(ctx),
       });
 
-      // Pi drops MCP annotations on the direct path; recover the server's own
-      // declaration from the adapter cache so a read-only tool is not denied as
-      // unproven. This is evidence only: it cannot lift a hard block.
-      const annotations = resolveToolAnnotations(params.tool, targetTool.annotations);
+      // Only live metadata is evidence. Name-matched cache entries cannot prove
+      // the runtime tool's origin, schema identity or freshness.
+      const { annotations, concreteMcp } = monitorToolEvidence(targetTool);
 
-      if (!isAllowedMonitorTool(params.tool, annotations, params.args ?? {}, trust)) {
+      if (!isAllowedMonitorTool(params.tool, annotations, params.args ?? {}, trust, concreteMcp)) {
         const isShell = params.tool === "bash" || params.tool === "hypa_shell";
-        const reason = isShell
-          ? `'${params.tool}' needs a nonempty 'command' argument to poll.`
-          : `'${params.tool}' is not a provably read-only tool.`;
-        const hint = isShell
-          ? "Pass { command: \"...\" } in args to select the query."
-          : "The server declares no readOnlyHint for it. Allow it by name under an \"## Allow\" heading in " +
-            `${trust.sources.length > 0 ? trust.sources.join(" or ") : userTrustFilePath()}.`;
+        const denied = matchesToolPatterns(params.tool, trust.deny);
+        const destructive = !isShell && annotations?.destructiveHint === true;
+        const hardBlocked = !isShell && !isAllowedMonitorTool(params.tool, { readOnlyHint: true }, undefined, undefined, concreteMcp);
+        let reason: string;
+        let hint: string;
+        if (denied) {
+          reason = `'${params.tool}' is explicitly denied by your trust rules.`;
+          hint = "Deny takes precedence over all allow paths, including shell tools.";
+        } else if (destructive || hardBlocked) {
+          reason = `'${params.tool}' is blocked by the destructive-tool policy.`;
+          hint = "An Allow rule cannot override a hard block.";
+        } else if (isShell) {
+          reason = `'${params.tool}' needs a nonempty 'command' argument to poll.`;
+          hint = "Pass { command: \"...\" } in args to select the query.";
+        } else {
+          reason = `'${params.tool}' has no live read-only declaration or explicit Allow rule.`;
+          hint = "For a tool you have verified as read-only, add its name under an \"## Allow\" heading in " +
+            `${trust.sources.length > 0 ? trust.sources.join(" or ") : userTrustFilePath()}. Cached annotations do not grant access.`;
+        }
         return {
           content: [{ type: "text", text: `Cannot start monitor: ${reason} It cannot be used for background monitoring with these arguments. ${hint}` }],
           details: { error: `Tool '${params.tool}' is not permitted for background monitoring`, hint },

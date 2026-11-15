@@ -1,11 +1,12 @@
 # pi-monitor trust
 
-Background monitors may only poll a tool that is provably read-only. A tool
-proves it by declaring `readOnlyHint: true`. pi-monitor first reads that
-declaration from the host; when an MCP adapter drops the annotations payload,
-it recovers them from the adapter's cache (`~/.pi/agent/mcp-cache.json`) before
-falling back to this file. Use this file for servers that declare nothing at
-all, or to `Deny` a tool you do not want the monitor to poll.
+Background monitors require a live `readOnlyHint: true` declaration, a known
+read-only builtin, or an explicit Allow rule. The documented shell exception
+accepts arbitrary nonempty commands; only use it for read-only queries.
+Cached MCP annotations do not grant access: flat name matches cannot prove
+runtime ownership, schema identity or freshness. If the adapter drops live
+annotations, explicitly Allow a tool only after verifying it is read-only.
+Use `Deny` for tools you do not want the monitor to poll.
 
 Copy this file to `~/.pi/agent/pi-monitor.md` and edit the lists below. For
 rules that belong to one repository, put a `PI-MONITOR.md` at its root instead;
@@ -21,7 +22,7 @@ and `?` matches exactly one.
     mail_list_*                 any tool whose name starts with mail_list_
     *status
     index_search
-    mcp__server__read_*         a specific tool on a specific MCP server
+    server_read_*              a directly registered server read tool
 
 An Allow entry cannot override the hard blocks: forbidden gateways (`mcp`,
 `mcpScript`), MCP namespace proxies (`mcp__<server>`), tools that declare
@@ -29,9 +30,10 @@ An Allow entry cannot override the hard blocks: forbidden gateways (`mcp`,
 (write, edit, delete, remove, create, update, set_, send, print, …). If a name
 is rejected despite an Allow entry here, that is why.
 
-A `Deny` entry is the one rule that beats everything except those blocks: it
-removes a tool that the server itself declared read-only, or that a known
-read-only builtin list would otherwise admit.
+A `Deny` entry takes precedence over every allow path, including `bash`,
+`hypa_shell`, live read-only annotations and known read-only builtins.
+Shell tools retain their documented exception to destructive metadata checks;
+that exception never bypasses an explicit Deny.
 
 ## Allow
 

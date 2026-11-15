@@ -70,6 +70,15 @@ test("a bare name owned by more than one server is treated as ambiguous", () => 
   assert.equal(lookupCachedMcpTool("beta_status", { cachePath: path }).annotations.destructiveHint, true);
 });
 
+test("unannotated tools still participate in diagnostic ambiguity detection", () => {
+  const path = writeCache({
+    alpha: { tools: [{ name: "status", annotations: readOnly }] },
+    beta: { tools: [{ name: "status" }] },
+  });
+  assert.equal(lookupCachedMcpTool("status", { cachePath: path }), undefined);
+  assert.equal(lookupCachedMcpTool("alpha_status", { cachePath: path }).annotations.readOnlyHint, true);
+});
+
 test("tools without annotations never enter the index", () => {
   const path = writeCache({
     exa: { tools: [{ name: "web_search_exa" }, { name: "web_fetch_exa", annotations: {} }] },
@@ -78,16 +87,17 @@ test("tools without annotations never enter the index", () => {
   assert.equal(lookupCachedMcpTool("exa_web_fetch_exa", { cachePath: path }), undefined);
 });
 
-test("resolveToolAnnotations lets live values win and fills gaps from cache", () => {
+test("resolveToolAnnotations never grants authority from an unbound cache", () => {
   const path = writeCache({
     mail: { tools: [{ name: "list_emails_metadata", annotations: readOnly }] },
   });
 
-  // No live annotations (the direct path): cache supplies them.
+  // Even an exact prefixed name may belong to a local tool or a stale server.
   assert.equal(
-    resolveToolAnnotations("mail_list_emails_metadata", undefined, { cachePath: path }).readOnlyHint,
-    true
+    resolveToolAnnotations("mail_list_emails_metadata", undefined, { cachePath: path }),
+    undefined
   );
+  assert.deepEqual(resolveToolAnnotations("mail_list_emails_metadata", readOnly, { cachePath: path }), readOnly);
 
   // A live explicit false is authoritative; the cache must not override it.
   assert.equal(
@@ -96,13 +106,13 @@ test("resolveToolAnnotations lets live values win and fills gaps from cache", ()
     false
   );
 
-  // A live destructiveHint is preserved alongside a cached readOnlyHint.
+  // Missing live fields stay missing; cache data cannot fill authorization gaps.
   const merged = resolveToolAnnotations(
     "mail_list_emails_metadata",
     { destructiveHint: true },
     { cachePath: path }
   );
-  assert.equal(merged.readOnlyHint, true);
+  assert.equal(merged.readOnlyHint, undefined);
   assert.equal(merged.destructiveHint, true);
 
   // Unknown tool: whatever live said, or undefined.

@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { MonitorScheduler } from "./scheduler.ts";
-import { sanitizeRecord } from "./tools.ts";
 
 export function registerMonitorCommands(pi: ExtensionAPI, scheduler: MonitorScheduler) {
   // 1. /monitor_cancel
@@ -61,7 +60,7 @@ export function registerMonitorCommands(pi: ExtensionAPI, scheduler: MonitorSche
           return;
         }
         const stateDesc = record.terminalReason ? `(${record.terminalReason})` : "monitoring";
-        ctx.ui.notify(`[${record.status.toUpperCase()}] ${record.id} · ${record.tool}: ${stateDesc}`, "info");
+        ctx.ui.notify(`[${record.status.toUpperCase()}] ${record.id} · ${record.tool}: ${stateDesc}${record.notificationError ? ` — ${record.notificationError}` : ""}`, record.notificationError ? "warning" : "info");
         return;
       }
 

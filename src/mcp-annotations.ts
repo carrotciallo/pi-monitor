@@ -1,20 +1,8 @@
 /**
- * Recovers MCP tool annotations from pi-mcp-adapter's on-disk cache.
- *
- * The adapter registers MCP tools with Pi but does not forward the server's
- * `annotations` payload: its `DirectToolSpec` has no annotations field, and the
- * surface builder copies only name/description/inputSchema. A read-only MCP
- * tool therefore reaches pi-monitor looking unproven and lands on the default
- * deny, even though the server explicitly declared `readOnlyHint: true`.
- *
- * The adapter's own cache (`~/.pi/agent/mcp-cache.json`) does retain the
- * payload. This module maps Pi's flat tool name back to the cache entry so a
- * server's own declaration is honoured without patching the adapter.
- *
- * This is evidence only. It can never admit what a hard block denies, because
- * `isAllowedMonitorTool` checks `destructiveHint` and the mutating-name rules
- * before it consults annotations. A tool whose cache entry says
- * `destructiveHint: true` is rejected either way.
+ * Diagnostic lookup of pi-mcp-adapter's on-disk annotations cache.
+ * Name guesses cannot prove runtime ownership, schema identity or freshness.
+ * Cached entries MUST NOT authorize polling; only live annotations and explicit
+ * user trust rules may do so. The lookup remains available for diagnostics.
  */
 
 import { readFileSync, statSync } from "node:fs";
@@ -103,14 +91,12 @@ function buildIndex(cache: unknown): Map<string, McpToolEntry> {
       if (typeof originalName !== "string" || !originalName) continue;
 
       const rawAnnotations = (tool as { annotations?: unknown })?.annotations;
-      if (!rawAnnotations || typeof rawAnnotations !== "object") continue;
-
-      const source = rawAnnotations as Record<string, unknown>;
+      const source = rawAnnotations && typeof rawAnnotations === "object"
+        ? rawAnnotations as Record<string, unknown> : {};
       const annotations: McpAnnotations = {};
       for (const key of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const) {
         if (typeof source[key] === "boolean") annotations[key] = source[key] as boolean;
       }
-      if (Object.keys(annotations).length === 0) continue;
 
       for (const serverForm of serverNameForms(serverName)) {
         for (const toolForm of toolNameForms(originalName)) {
@@ -140,7 +126,9 @@ function buildIndex(cache: unknown): Map<string, McpToolEntry> {
     }
   }
 
-  for (const name of ambiguous) index.delete(name);
+  for (const [name, entry] of index) {
+    if (ambiguous.has(name) || Object.keys(entry.annotations).length === 0) index.delete(name);
+  }
   return index;
 }
 
@@ -177,20 +165,14 @@ export function lookupCachedMcpTool(
 }
 
 /**
- * Merges the annotations Pi reports with the ones the server declared. Live
- * values win, because an explicit `false` from Pi means the server really said
- * so; the cache only fills in what Pi dropped.
+ * Only live metadata is authorization evidence. Until the host provides a
+ * verified server/tool/schema binding, a missing annotation stays unproven.
+ * Legacy parameters are retained for callers, not consulted for authorization.
  */
 export function resolveToolAnnotations(
-  toolName: string,
+  _toolName: string,
   live?: McpAnnotations,
-  options: McpLookupOptions = {}
+  _options: McpLookupOptions = {}
 ): McpAnnotations | undefined {
-  const cached = lookupCachedMcpTool(toolName, options)?.annotations;
-  if (!cached) return live;
-  if (!live) return cached;
-  return {
-    readOnlyHint: live.readOnlyHint ?? cached.readOnlyHint,
-    destructiveHint: live.destructiveHint ?? cached.destructiveHint,
-  };
+  return live;
 }

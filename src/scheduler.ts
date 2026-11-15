@@ -2,7 +2,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { formatCompletionNotification, formatInterruptionNotice, formatWidgetLines } from "./formatter.ts";
 import { observeDisplayValues } from "./display.ts";
 import { formatLostMonitorNotice } from "./lifecycle.ts";
-import { canonicalJson, matchesCondition, observeConditionValue } from "./matcher.ts";
+import { canonicalJson, computeSha256, matchesCondition, observeConditionValue, validateMonitorSample } from "./matcher.ts";
+import { sanitizeValue } from "./privacy.ts";
+import { classifyFailure } from "./error-classification.ts";
 import {
   DEFAULT_CONSECUTIVE_MATCHES,
   DEFAULT_INTERVAL_SECONDS,
@@ -24,7 +26,6 @@ import {
   type MonitorPersistEntry,
   type MonitorRecord,
   type MonitorStatus,
-  type DisplayFieldSpec,
   NOTIFICATION_CUSTOM_TYPE,
   WIDGET_KEY,
 } from "./types.ts";
@@ -122,8 +123,42 @@ export class MonitorScheduler {
 
     while (ids.size > MAX_STORED_RECORDS_PER_SESSION && nonRunning.length > 0) {
       const oldest = nonRunning.shift()!;
-      ids.delete(oldest.id);
-      this.records.delete(oldest.id);
+      this.releaseRecord(oldest.id);
+    }
+  }
+
+  /** Drop every index owned by a record, not just the public record. */
+  private releaseRecord(id: string): void {
+    const record = this.records.get(id);
+    this.clearTimer(id);
+    this.abortControllers.get(id)?.abort();
+    this.abortControllers.delete(id);
+    this.inFlight.delete(id);
+    this.records.delete(id);
+    this.interruptionNotified.delete(id);
+    this.lostNotified.delete(id);
+    if (record) {
+      this.sessionMonitors.get(record.sessionId)?.delete(id);
+      this.persisted.get(record.sessionId)?.delete(id);
+    }
+  }
+
+  private trimPersisted(sessionId: string): void {
+    const entries = this.persisted.get(sessionId);
+    if (!entries) return;
+    while (entries.size > MAX_STORED_RECORDS_PER_SESSION) {
+      const id = entries.keys().next().value;
+      if (id === undefined) break;
+      entries.delete(id);
+      this.lostNotified.delete(id);
+      this.interruptionNotified.delete(id);
+    }
+  }
+
+  /** UI is optional: a broken renderer must never stop polling or delivery. */
+  private safeUI(action: () => void): void {
+    try { action(); } catch {
+      console.error("[pi-monitor] UI update failed; monitoring state is unaffected");
     }
   }
 
@@ -134,23 +169,26 @@ export class MonitorScheduler {
    */
   private persist(record: MonitorRecord, event: MonitorPersistEntry["event"], reason?: string): void {
     const entry: MonitorPersistEntry = {
-      version: 1,
+      version: 2,
       monitorId: record.id,
       event,
       tool: record.tool,
       argsHash: safeArgsHash(record.args),
-      condition: record.condition,
-      options: record.options,
+      options: { ...record.options, description: undefined },
       status: record.status,
       createdAt: record.createdAt,
       terminalAt: record.completedAt,
-      reason,
+      // User conditions, descriptions, tool errors and interruption text may
+      // contain secrets. Persist only the fixed lifecycle event classification.
+      reason: reason === undefined ? undefined : event,
       attempts: record.attempts,
-      interruptedBy: record.interruptedBy,
+      interruptedBy: record.interruptedBy === undefined ? undefined : "lifecycle-change",
     };
     const sessionMap = this.persisted.get(record.sessionId) ?? new Map<string, MonitorPersistEntry>();
+    sessionMap.delete(record.id);
     sessionMap.set(record.id, entry);
     this.persisted.set(record.sessionId, sessionMap);
+    this.trimPersisted(record.sessionId);
     if (this.pi && typeof this.pi.appendEntry === "function") {
       try {
         this.pi.appendEntry(STATE_ENTRY_TYPE, entry);
@@ -175,13 +213,20 @@ export class MonitorScheduler {
       const entry = raw as { type?: string; customType?: string; data?: unknown };
       if (entry?.type !== "custom" || entry.customType !== STATE_ENTRY_TYPE) continue;
       const data = entry.data as MonitorPersistEntry | undefined;
-      if (!data || data.version !== 1 || typeof data.monitorId !== "string") continue;
+      if (!data || (data.version !== 1 && data.version !== 2) || typeof data.monitorId !== "string") continue;
       const previous = latest.get(data.monitorId);
       if (!previous || (data.terminalAt ?? data.createdAt) >= (previous.terminalAt ?? previous.createdAt)) {
         latest.set(data.monitorId, data);
       }
     }
+    for (const id of this.persisted.get(sessionId)?.keys() ?? []) {
+      if (!latest.has(id) && !this.records.has(id)) {
+        this.lostNotified.delete(id);
+        this.interruptionNotified.delete(id);
+      }
+    }
     this.persisted.set(sessionId, latest);
+    this.trimPersisted(sessionId);
 
     const live = new Set(this.getSessionRecords(sessionId).map(r => r.id));
     const lost: MonitorPersistEntry[] = [];
@@ -209,7 +254,7 @@ export class MonitorScheduler {
     const notice = formatLostMonitorNotice(fresh);
     const ctx = this.uiContexts.get(sessionId);
     if (notice && ctx?.hasUI) {
-      ctx.ui.notify(notice, "warning");
+      this.safeUI(() => ctx.ui.notify(notice, "warning"));
     }
     return notice;
   }
@@ -220,7 +265,7 @@ export class MonitorScheduler {
    * persisted interrupted descriptors (reload), so an interruption never
    * disappears silently. Returns the notice text for non-UI delivery.
    */
-  public notifyInterruptions(sessionId: string, reason = "a session or branch change"): string | undefined {
+  public notifyInterruptions(sessionId: string, _reason = "a session or branch change"): string | undefined {
     const notices: string[] = [];
 
     const live = this.getSessionRecords(sessionId).filter(
@@ -254,7 +299,7 @@ export class MonitorScheduler {
     const combined = notices.join("\n");
     const ctx = this.uiContexts.get(sessionId);
     if (ctx?.hasUI) {
-      ctx.ui.notify(combined, "warning");
+      this.safeUI(() => ctx.ui.notify(combined, "warning"));
     }
     return combined;
   }
@@ -419,7 +464,8 @@ export class MonitorScheduler {
     id: string,
     reason = "User or agent requested cancellation",
     requestingSessionId?: string,
-    kind: CancelKind = "explicit"
+    kind: CancelKind = "explicit",
+    persist = true
   ): boolean {
     const record = this.records.get(id);
     if (!record || record.status !== "running") {
@@ -446,10 +492,11 @@ export class MonitorScheduler {
 
     // Clear timers
     this.clearTimer(id);
-    this.inFlight.set(id, false);
+    this.inFlight.delete(id);
+    record.nextCheckAt = undefined;
 
-    // Persist the terminal descriptor and refresh UI.
-    this.persist(record, record.status, reason);
+    // Post-tree interruption must not append old-branch state to the new branch.
+    if (persist) this.persist(record, record.status, reason);
     this.updateUI(record.sessionId);
 
     // Smooth UI cleanup after 20s if no active monitors
@@ -476,11 +523,11 @@ export class MonitorScheduler {
   }
 
   /** Interrupt every running monitor for a session due to a lifecycle change. */
-  public interruptSession(sessionId: string, reason: string): void {
+  public interruptSession(sessionId: string, reason: string, persist = true): void {
     const records = this.getSessionRecords(sessionId);
     for (const r of records) {
       if (r.status === "running") {
-        this.cancel(r.id, reason, sessionId, "interrupted");
+        this.cancel(r.id, reason, sessionId, "interrupted", persist);
       }
     }
   }
@@ -490,12 +537,7 @@ export class MonitorScheduler {
     const ids = this.sessionMonitors.get(sessionId);
     if (ids) {
       for (const id of ids) {
-        this.clearTimer(id);
-        this.records.delete(id);
-        this.inFlight.delete(id);
-        this.abortControllers.delete(id);
-        this.interruptionNotified.delete(id);
-        this.lostNotified.delete(id);
+        this.releaseRecord(id);
       }
       this.sessionMonitors.delete(sessionId);
     }
@@ -506,6 +548,10 @@ export class MonitorScheduler {
     }
     this.uiContexts.delete(sessionId);
     this.toolContexts.delete(sessionId);
+    for (const id of this.persisted.get(sessionId)?.keys() ?? []) {
+      this.lostNotified.delete(id);
+      this.interruptionNotified.delete(id);
+    }
     this.persisted.delete(sessionId);
   }
 
@@ -576,7 +622,8 @@ export class MonitorScheduler {
           toolName: record.tool,
         };
       } finally {
-        this.inFlight.set(id, false);
+        // Deletion cannot resurrect state after pruning a late execution.
+        this.inFlight.delete(id);
         this.abortControllers.delete(id);
       }
 
@@ -591,11 +638,21 @@ export class MonitorScheduler {
         return;
       }
 
-      // Safe truncate result content to 4KB
-      if (queryResult.content && queryResult.content.length > MAX_CONTENT_LENGTH) {
-        queryResult.content = queryResult.content.slice(0, MAX_CONTENT_LENGTH) + " ...[truncated]";
+      if (!queryResult.isError) {
+        try {
+          validateMonitorSample(queryResult);
+        } catch (error) {
+          queryResult = { content: "", isError: true, toolName: record.tool,
+            errorText: `Invalid monitor sample: ${error instanceof Error ? error.message : "validation failed"}` };
+        }
       }
-      record.lastResult = queryResult;
+      // Keep a bounded projection, but match against the complete sample below.
+      record.lastResult = {
+        ...queryResult,
+        content: queryResult.content.slice(0, MAX_CONTENT_LENGTH),
+        structuredContent: sanitizeValue("structuredContent", queryResult.structuredContent),
+        errorText: queryResult.errorText?.slice(0, 200),
+      };
 
       // Handle execution errors with bounded backoff retry.
       // Errors are not observed samples: they reset match progress and clear the
@@ -608,6 +665,12 @@ export class MonitorScheduler {
         record.firstMatchAt = undefined;
         record.lastObservedValue = undefined;
         record.displayValues = undefined;
+        const failureClass = classifyFailure(queryResult.errorText ?? queryResult.content);
+        if (failureClass === "policy_denied" || failureClass === "tool_unavailable") {
+          record.lastErrorText = failureClass;
+          this.finishRecord(record, "failed", `Non-retryable query failure: ${failureClass}`);
+          return;
+        }
         if (record.consecutiveErrors > record.options.maxRetries) {
           const errDetail = queryResult.errorText ? `: ${queryResult.errorText}` : "";
           this.finishRecord(record, "failed", `Consecutive errors (${record.consecutiveErrors}) exceeded retry limit${errDetail}`);
@@ -667,8 +730,13 @@ export class MonitorScheduler {
 
       // Condition not yet met: schedule next routine check.
       this.scheduleNext(id, currentGen, record.options.intervalSeconds * 1000);
-    } catch (unexpectedError) {
-      console.error("[pi-monitor] unexpected error in pollStep:", unexpectedError);
+    } catch {
+      // Never leave a running record with no next check. Do not log raw tool
+      // exceptions here: they may contain arguments or credentials.
+      const record = this.records.get(id);
+      if (record?.status === "running") {
+        this.finishRecord(record, "failed", "Internal sample processing failed; monitoring stopped safely");
+      }
     }
   }
 
@@ -702,7 +770,7 @@ export class MonitorScheduler {
       this.abortControllers.delete(record.id);
     }
     this.clearTimer(record.id);
-    this.inFlight.set(record.id, false);
+    this.inFlight.delete(record.id);
 
     this.persist(record, status, reason);
 
@@ -710,10 +778,7 @@ export class MonitorScheduler {
     this.updateUI(record.sessionId);
 
     // Send notification and wake model if not already notified
-    if (!record.notified) {
-      record.notified = true;
-      this.notifyCompletion(record);
-    }
+    if (!record.notified) this.notifyCompletion(record);
 
     // Schedule 20s smooth widget card cleanup
     this.checkScheduleWidgetCleanup(record.sessionId);
@@ -727,7 +792,7 @@ export class MonitorScheduler {
       const uiCtx = this.uiContexts.get(sessionId);
       if (uiCtx?.hasUI) {
         for (const r of sessionRecords) {
-          uiCtx.ui.setStatus(`command:/monitor_cancel ${r.id}`, undefined);
+          this.safeUI(() => uiCtx.ui.setStatus(`command:/monitor_cancel ${r.id}`, undefined));
         }
       }
 
@@ -740,7 +805,7 @@ export class MonitorScheduler {
         const currentCtx = this.uiContexts.get(sessionId);
         const currentRecords = this.getSessionRecords(sessionId);
         if (!currentRecords.some(r => r.status === "running")) {
-          currentCtx?.ui.setWidget(WIDGET_KEY, undefined);
+          if (currentCtx?.hasUI) this.safeUI(() => currentCtx.ui.setWidget(WIDGET_KEY, undefined));
         }
       }, 20000);
       this.clearWidgetTimers.set(sessionId, clearTimer);
@@ -748,12 +813,11 @@ export class MonitorScheduler {
   }
 
   private notifyCompletion(record: MonitorRecord): void {
-    if (!this.pi) return;
-
-    const summary = formatCompletionNotification(record);
     const uiCtx = this.uiContexts.get(record.sessionId);
-
-    this.pi.sendMessage(
+    try {
+      if (!this.pi) throw new Error("Notification API unavailable");
+      const summary = formatCompletionNotification(record);
+      this.pi.sendMessage(
       {
         customType: NOTIFICATION_CUSTOM_TYPE,
         content: summary,
@@ -767,19 +831,29 @@ export class MonitorScheduler {
         },
       },
       { deliverAs: "followUp", triggerTurn: true }
-    );
+      );
+      // This confirms only synchronous host acceptance, not end-to-end delivery.
+      record.notified = true;
+    } catch {
+      record.notificationError = "Notification delivery is unconfirmed; automatic retry suppressed to avoid duplicate wake-ups";
+      console.error("[pi-monitor] " + record.notificationError);
+    }
 
     if (uiCtx?.hasUI) {
       const label = record.options.description || record.tool;
       const notifyType = record.status === "completed" ? "info" : "warning";
-      uiCtx.ui.notify(
-        `[Pi-Monitor] ${label}: ${record.status}`,
-        notifyType
-      );
+      this.safeUI(() => uiCtx.ui.notify(
+        `[Pi-Monitor] ${label}: ${record.status}${record.notificationError ? ` — ${record.notificationError}` : ""}`,
+        record.notificationError ? "warning" : notifyType
+      ));
     }
   }
 
   public updateUI(sessionId: string): void {
+    this.safeUI(() => this.renderUI(sessionId));
+  }
+
+  private renderUI(sessionId: string): void {
     const ctx = this.uiContexts.get(sessionId);
     if (!ctx?.hasUI) return;
 
@@ -807,7 +881,7 @@ function clamp(value: number, min: number, max: number): number {
 /** Canonical digest of tool arguments; never stores the raw arguments. */
 function safeArgsHash(args: Record<string, unknown>): string {
   try {
-    return canonicalJson(args);
+    return computeSha256(args);
   } catch {
     return "[unhashable]";
   }

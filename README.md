@@ -148,12 +148,12 @@ When a task is pending and requires a later check, the agent calls `monitor_star
 
 ## Safety & Permissions
 
-- **Default-Deny Read Policy**: Non-shell tools must be provably read-only. A tool is admitted when it is a known read-only builtin, or when it declares `readOnlyHint: true` itself. Anything unproven is rejected.
-- **Annotations Survive the Adapter**: Some MCP adapters register a server's tools without forwarding its `annotations` payload, which would make an explicitly read-only tool look unproven. When that happens pi-monitor recovers the declaration from the adapter's on-disk cache. This is evidence only, never authority: it cannot lift a hard block below, and a cached `readOnlyHint: true` on a mutating tool name is still rejected.
-- **Hard Blocks Outrank Everything**: Forbidden gateways (`mcp`, `mcpScript`), MCP namespace proxies (`mcp__*`), `destructiveHint: true`, and mutating tool names are rejected before any annotation or trust rule is consulted. A mislabelled `readOnlyHint` therefore cannot admit a destructive tool, and trusting a proxy cannot hand the monitor every tool behind it.
-- **Shell Query Constraints**: `bash` and `hypa_shell` accept nonempty commands. System guidelines instruct the agent to execute only idempotent read-only status checks. Commands inherit the host's existing permission boundaries.
+- **Default-Deny Read Policy**: Non-shell tools need a known read-only builtin, a live `readOnlyHint: true` declaration, or an explicit trusted Allow rule. Unproven tools are rejected.
+- **Live Annotations Only**: Cached names cannot prove runtime ownership, schema identity or freshness and never grant access. When an adapter drops live annotations, explicitly Allow only tools you have verified as read-only.
+- **Non-Shell Hard Blocks**: Forbidden gateways (`mcp`, `mcpScript`), MCP namespace proxies (`mcp__*`), `destructiveHint: true`, and mutating tool names are rejected before any annotation or trust rule is consulted. A mislabelled `readOnlyHint` therefore cannot admit a destructive tool, and trusting a proxy cannot hand the monitor every tool behind it.
+- **Shell Query Constraints**: `bash` and `hypa_shell` accept arbitrary nonempty commands, including tools with destructive metadata, but never bypass explicit Deny rules. System guidelines instruct the agent to execute only idempotent read-only status checks. Commands inherit the host's existing permission boundaries.
 - **Call Leases**: Scoped, one-use call leases allow seamless compatibility with external repeat guards and loop protection extensions.
-- **Memory-Only & Redaction**: Execution state lives in memory only. Retained audit logs are capped at 10 items per session with automated redaction of sensitive arguments.
+- **Retention & Redaction**: Runtime records and cached descriptors are capped at 10 per session. Durable session history is not capped: version-2 lifecycle entries store argument digests and fixed classifications, not raw arguments, conditions or results. Named sensitive fields are redacted in bounded status previews; arbitrary free text is not guaranteed safe. Existing version-1 history is not rewritten; see [SECURITY.md](SECURITY.md).
 
 ### Trusting a tool your host cannot vouch for
 
@@ -174,11 +174,11 @@ Many MCP servers describe their tools loosely, or not at all, so the default den
 - **Project level**: `PI-MONITOR.md` at the project root, read **only** when the project is trusted, so an untrusted repository cannot grant itself monitoring access.
 - Patterns are globs: `*` matches any run of characters, `?` exactly one; matching is case-insensitive.
 - Only `-` list items under an `Allow`/`Deny` heading are rules. Everything else is documentation and is ignored, so the file can explain itself.
-- An explicit `Deny` beats an annotation. An explicit `Allow` rescues an unannotated tool. Neither can override a hard block above.
+- An explicit `Deny` beats every allow path, including shell tools and annotations. An explicit `Allow` rescues an unannotated tool. Neither can override a hard block above.
 
 A commented starting point lives at [`docs/trust-example.md`](docs/trust-example.md); copy it to `~/.pi/agent/pi-monitor.md` and edit the two lists.
 
-The cache fallback reads `~/.pi/agent/mcp-cache.json`; set `PI_MONITOR_MCP_CACHE` to point elsewhere.
+The legacy cache lookup is diagnostic only; neither `~/.pi/agent/mcp-cache.json` nor `PI_MONITOR_MCP_CACHE` grants monitoring permission.
 
 ---
 

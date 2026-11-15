@@ -114,6 +114,8 @@ export interface MonitorRecord {
     errorText?: string;
   };
   terminalReason?: string;
+  /** Fixed diagnostic when synchronous host acceptance cannot be confirmed. */
+  notificationError?: string;
   notified: boolean;
 }
 
@@ -128,12 +130,13 @@ export interface MatchEvaluationResult {
  * Never stores raw tool arguments or results; `argsHash` is a canonical digest.
  */
 export interface MonitorPersistEntry {
-  version: 1;
+  version: 1 | 2;
   monitorId: string;
   event: "started" | MonitorStatus;
   tool: string;
   argsHash: string;
-  condition: MonitorCondition;
+  /** Legacy v1 only. New entries omit conditions and user descriptions. */
+  condition?: MonitorCondition;
   options: MonitorRecord["options"];
   status: MonitorStatus;
   createdAt: number;
@@ -147,6 +150,8 @@ export const MAX_DISPLAY_FIELDS = 4;
 export const MAX_CONCURRENT_MONITORS = 5;
 export const MAX_STORED_RECORDS_PER_SESSION = 10;
 export const MAX_CONTENT_LENGTH = 4096;
+/** Full samples are evaluated within this budget, never silently truncated. */
+export const MAX_SAMPLE_LENGTH = 262144;
 export const MIN_INTERVAL_SECONDS = 2;
 export const MAX_INTERVAL_SECONDS = 300;
 export const DEFAULT_INTERVAL_SECONDS = 5;

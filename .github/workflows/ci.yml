@@ -18,5 +18,15 @@ jobs:
           cache: npm
       - run: npm ci --include=dev
       - run: npm run check
+      - name: Install pinned cross-plugin fixtures (no lifecycle scripts)
+        run: >-
+          npm install --prefix "$RUNNER_TEMP/monitor-fixtures"
+          --ignore-scripts --no-audit --no-fund
+          billion-context@0.1.215 pi-mcp-adapter@7.0.1
       - run: npm test
+        env:
+          PI_MONITOR_ACP_ROOT: >-
+            ${{ runner.temp }}/monitor-fixtures/node_modules/billion-context
+          PI_MONITOR_MCP_ROOT: >-
+            ${{ runner.temp }}/monitor-fixtures/node_modules/pi-mcp-adapter
       - run: npm pack --dry-run

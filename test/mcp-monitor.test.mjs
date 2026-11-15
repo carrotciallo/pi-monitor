@@ -78,7 +78,7 @@ test("monitor_start polls an annotated MCP tool and keeps proxies blocked", asyn
     const mutating = await start.execute("c3", startParams("mail_send_email", { account_name: "default" }),
       undefined, undefined, ctx);
     assert.equal(mutating.isError, true, "a read-write tool must stay blocked");
-    assert.match(mutating.content[0].text, /provably read-only/);
+    assert.match(mutating.content[0].text, /destructive-tool policy/);
   } finally {
     env.hooks.get("session_shutdown")?.({}, ctx);
   }
@@ -116,7 +116,7 @@ test("monitor_start honours a user trust file, and only a trusted project file",
   }
 });
 
-test("monitor_start recovers dropped MCP annotations from the adapter cache", async () => {
+test("monitor_start refuses unbound cache authority and accepts explicit trust", async () => {
   // Pi reports these with no annotations at all, exactly as the adapter's
   // direct path does. Only the on-disk cache knows what the servers declared.
   const env = createEnvironment([
@@ -144,13 +144,17 @@ test("monitor_start recovers dropped MCP annotations from the adapter cache", as
   const previousCache = process.env.PI_MONITOR_MCP_CACHE;
   const previousTrust = process.env.PI_MONITOR_TRUST_FILE;
   process.env.PI_MONITOR_MCP_CACHE = cachePath;
-  // Point the trust file at nothing so only the cache can grant access.
+  // No trust rule: cached annotations alone must not grant access.
   process.env.PI_MONITOR_TRUST_FILE = join(dir, "absent-trust.md");
   try {
     const ctx = createContext(tmpdir());
     const allowed = await start.execute("c1", startParams("mail_list_emails_metadata", { account_name: "default" }),
       undefined, undefined, ctx);
-    assert.notEqual(allowed.isError, true, "a cache-declared read-only tool must be pollable without a trust file");
+    assert.equal(allowed.isError, true, "unbound cached annotations must not authorize a runtime tool");
+    writeFileSync(process.env.PI_MONITOR_TRUST_FILE, "## Allow\n- mail_list_emails_metadata\n");
+    const trusted = await start.execute("trusted", startParams("mail_list_emails_metadata", { account_name: "default" }),
+      undefined, undefined, ctx);
+    assert.notEqual(trusted.isError, true, "explicit user trust remains supported");
 
     const mislabelled = await start.execute("c2", startParams("mail_send_email", { account_name: "default" }),
       undefined, undefined, ctx);

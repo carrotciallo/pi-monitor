@@ -40,14 +40,14 @@ test("interruption is distinct from explicit cancellation and never wakes a turn
   const monitorId = res.details.recordId;
   assert.ok(monitorId);
 
-  // A branch switch interrupts rather than explicitly cancelling.
-  env.hooks.get("session_before_tree")({ type: "session_before_tree" }, ctx);
+  // A committed shutdown persists on the old session before it is replaced.
+  env.hooks.get("session_shutdown")({ reason: "resume" }, ctx);
 
   const schedulerRecord = env.entries.find(e => e.type === STATE_ENTRY_TYPE && e.data.event === "interrupted");
   assert.ok(schedulerRecord, "an interrupted terminal descriptor is persisted");
   assert.equal(schedulerRecord.data.status, "interrupted");
-  assert.match(schedulerRecord.data.reason, /branch switch/);
-  assert.match(schedulerRecord.data.interruptedBy, /branch switch/);
+  assert.equal(schedulerRecord.data.reason, "interrupted");
+  assert.equal(schedulerRecord.data.interruptedBy, "lifecycle-change");
 
   await new Promise(r => setTimeout(r, 200));
   assert.equal(env.messages.length, 0, "interruption must not send a followUp / wake a turn");
@@ -252,7 +252,7 @@ test("index session_start headless delivers exactly one nextTurn notice for a pe
   hooks.get("session_shutdown")({ reason: "quit" }, ctx);
 });
 
-test("index branch switch stops the monitor and a headless post-tree notice does not wake a turn", async () => {
+test("index branch switch stops the monitor and a headless post-tree notice does not wake a turn", async t => {
   const messages = [];
   const entries = [];
   const hooks = new Map();
@@ -274,6 +274,7 @@ test("index branch switch stops the monitor and a headless post-tree notice does
     async executeTool() { return { result: { content: [{ type: "text", text: "pending" }] }, isError: false }; },
   };
 
+  t.after(() => hooks.get("session_shutdown")({ reason: "quit" }, ctx));
   // A real monitor is running in this runtime (not from persistence).
   const res = await tools.get("monitor_start").execute("call-1", {
     tool: "remote_status", condition: { textContains: "never" }, intervalSeconds: 30, timeoutSeconds: 3600,
@@ -282,11 +283,15 @@ test("index branch switch stops the monitor and a headless post-tree notice does
   assert.ok(monitorId);
   messages.length = 0;
 
-  // Branch switch: interrupt before the leaf moves, then post-tree notice.
-  hooks.get("session_before_tree")({ type: "session_before_tree" }, ctx);
-  assert.equal(entries.some(e => e.type === STATE_ENTRY_TYPE && e.data.event === "interrupted" && e.data.monitorId === monitorId), true);
+  // A cancellable before-event cannot stop a monitor or write a terminal.
+  hooks.get("session_before_tree")?.({ type: "session_before_tree" }, ctx);
+  hooks.get("session_before_switch")?.({ reason: "resume" }, ctx);
+  const status = await tools.get("monitor_status").execute("status", { monitorId }, undefined, undefined, ctx);
+  assert.equal(status.details.status, "running");
 
   hooks.get("session_tree")({ type: "session_tree", newLeafId: "n", oldLeafId: "o" }, ctx);
+  assert.equal(entries.some(e => e.type === STATE_ENTRY_TYPE && e.data.event === "interrupted" && e.data.monitorId === monitorId), false,
+    "old-branch terminals must not be appended to the destination branch");
 
   assert.equal(messages.length, 1, "the post-tree notice is delivered once");
   assert.equal(messages[0].opts.deliverAs, "nextTurn");
