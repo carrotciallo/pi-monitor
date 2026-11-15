@@ -15,7 +15,7 @@
 </p>
 
 > **Nonblocking, bounded background monitoring for Pi Coding Agent.**  
-> Start a trusted read-only query, receive a monitor ID immediately, and resume the session when a condition is stably matched, a query fails, or the deadline expires. Say goodbye to idle token-burning polling loops in your agent workflows.
+> Start a trusted read-only query and receive a monitor ID immediately. When the monitor ends, record its observation, confirm it entered the session, then request a separate model wake. Avoid token-burning polling loops without confusing query completion with notification delivery.
 
 ---
 
@@ -26,7 +26,7 @@ When managing long-running background tasks (e.g. multi-step builds, long CI pip
 | Dimension | Legacy Agent Polling ❌ | With pi-monitor ✅ |
 | :--- | :--- | :--- |
 | **Execution Model** | Burns turn cycles with repetitive `sleep` and status tools | Instantly yields control; nonblocking bounded background polling |
-| **Token Consumption** | Repetitive status checks consume massive prompt context | Headless scheduler queries in background; **0 extra LLM tokens burned** |
+| **Token Consumption** | Repetitive status checks consume massive prompt context | Sampling does not invoke the model; subsequent wake turns still consume tokens |
 | **Turn Lifecycle** | Blocks user interaction or triggers dead-loop safeguards | Agent continues independent tasks or ends turn cleanly awaiting wakeup |
 | **Stability Validation** | Susceptible to transient flickers or single false positives | Dual debounce: `consecutiveMatches` and `stableForSeconds` |
 | **Concurrency & Safety** | Risk of overlapping queries and ReDoS vulnerabilities | **Single in-flight lock**, RE2JS ReDoS immunity, and scoped call leases |
@@ -36,7 +36,7 @@ When managing long-running background tasks (e.g. multi-step builds, long CI pip
 ## Architecture Overview
 
 **Pi-Web is supported, but not required.**  
-The extension relies on native Pi host extension APIs rather than a web-only backend. Compatible terminal hosts display a compact live status widget; background queries and session resume work equally well in headless environments.
+The extension relies on native Pi host extension APIs rather than a web-only backend. Compatible terminal hosts display a compact live status widget. Notification persistence and model wake are tracked separately in both UI and headless hosts; neither proves that a user has seen the observation.
 
 ---
 
@@ -52,8 +52,11 @@ Or install straight from the repository:
 pi install git:github.com/carrotciallo/pi-monitor
 ```
 
-Run `/reload` in an existing session.  
-*Requirements*: Node.js >= 22.19.0. The host must supply `ExtensionToolContext.executeTool`, `before_agent_start.systemPromptOptions.promptGuidelines`, and standard extension messaging APIs.
+Run `/reload` in an existing session after updating, or start a new session. Updating files does not hot-reload an already running extension. Reload interrupts active polling; it does not resume execution afterward.
+
+**1.4.1 is available as a [GitHub release](https://github.com/carrotciallo/pi-monitor/releases/tag/v1.4.1).** GitHub releases and npm publication are separate; this release does not establish that npm has the same version. Use the repository installation for these changes and verify the installed package version.
+
+*Requirements*: Node.js >= 22.19.0. The host must supply `ExtensionToolContext.executeTool`, `before_agent_start.systemPromptOptions.promptGuidelines`, idle/pending-message checks, branch reads, custom entries and standard extension messaging APIs. See [integration setup and rollback](integrations/README.md) for the optional, version-pinned ACP/MCP compatibility patches; those are not automatically applied by installing the base extension.
 
 ---
 
@@ -68,6 +71,8 @@ Run `/reload` in an existing session.
 | `monitor_cancel` | Agent Tool | Stop a specific monitor or all active monitors in the current session |
 | `/monitor_status [id]` | User Command | CLI / Web command to view live monitor status |
 | `/monitor_cancel [id\|all]` | User Command | CLI / Web command to terminate background monitors |
+| `/monitor-delivery` | User Command | Inspect branch-local notification receipts and separate wake-request states |
+| `/monitor-errors` | User Command | Inspect bounded, correlated diagnostics without raw query arguments |
 
 ---
 
@@ -141,18 +146,37 @@ When a task is pending and requires a later check, the agent calls `monitor_star
     ```
 
     renders as `progress=530/1000 · speed=1.2MB/s`. `totalField` reads a sibling field and wins over a fixed `total`. Values are bounded to 80 characters, sensitive field paths (containing `key`, `token`, `secret`, `password`, …) render as `[REDACTED]`, and composite values collapse to `[object]` or `[array: N]`. A failed or field-less sample clears the segment rather than showing a stale reading. Omitting `display` leaves the widget exactly as it was.
-  - On condition match, query failure, or timeout, a concise notification wakes the session. Raw response payloads stay in `monitor_status` to prevent context pollution.
+  - On condition match, terminal query failure, or timeout, a minimal outbox receipt is saved. Once the session is idle with no queued messages, a non-waking notification is appended and verified before requesting a separate model wake. Bounded response previews stay in `monitor_status`, not in notifications.
 - **Branch & Lifecycle Isolation**: Branch switches, session changes, reloads, or shutdowns transition active monitors to `interrupted` without firing turn-waking messages into improper sessions.
 
 ---
+
+## Notification Delivery in 1.4.1
+
+`notified: true` now means that a matching notification entry was found in the active session branch, **not** merely that `sendMessage()` returned. Monitor completion, notification persistence and successful model execution are different outcomes.
+
+| Delivery state | Meaning |
+| :--- | :--- |
+| `pending` | An unsent receipt is saved; waiting for a safe idle boundary |
+| `submitted` | A submission was attempted; receipt verification is in progress |
+| `persisted` | The matching notification entry exists in the active branch |
+| `delivery_unknown` | Persistence could not be confirmed; no blind resend |
+| `suppressed` | Cancellation/interruption deliberately sends no terminal notification; `notified` is false |
+
+Wake state is separate: `not_requested`, `submitted`, `persisted`, or `unconfirmed`. A wake without a matching entry after 30 seconds becomes `unconfirmed` with a fixed diagnostic. Even a persisted wake marker does not prove a successful model response.
+
+- Busy sessions have **no bounded delivery latency**. Pending state remains inspectable; the extension does not interrupt the user to force delivery.
+- Recovery only retries definitely unsent `pending` receipts in the active branch. Ambiguous submissions and wake attempts are not replayed; old-branch work is not delivered into a new branch.
+- Receipts contain IDs, tool name, terminal status and check count, not raw arguments, conditions, descriptions or errors. Old missing notifications without receipts are not reconstructed.
+- Validation: 158 tests passed with integration fixtures enabled and zero skips. SDK 1.1.0 and 1.5.2 tests verified two rapid failures reaching actual session JSONL, including simulated asynchronous wake rejection and recovery deduplication. **Live model end-to-end wake has not been verified by these tests.**
 
 ## Safety & Permissions
 
 - **Default-Deny Read Policy**: Non-shell tools need a known read-only builtin, a live `readOnlyHint: true` declaration, or an explicit trusted Allow rule. Unproven tools are rejected.
 - **Live Annotations Only**: Cached names cannot prove runtime ownership, schema identity or freshness and never grant access. When an adapter drops live annotations, explicitly Allow only tools you have verified as read-only.
-- **Non-Shell Hard Blocks**: Forbidden gateways (`mcp`, `mcpScript`), MCP namespace proxies (`mcp__*`), `destructiveHint: true`, and mutating tool names are rejected before any annotation or trust rule is consulted. A mislabelled `readOnlyHint` therefore cannot admit a destructive tool, and trusting a proxy cannot hand the monitor every tool behind it.
+- **Non-Shell Hard Blocks**: Generic gateways (`mcp`, `mcpScript`), unverified MCP proxies, `destructiveHint: true`, and mutating tool names cannot be admitted by an Allow rule. A concrete MCP tool can pass the prefix check only with verified adapter ownership and schema identity; this does not bypass read-only checks. A proxy name alone never grants access to the tools behind it.
 - **Shell Query Constraints**: `bash` and `hypa_shell` accept arbitrary nonempty commands, including tools with destructive metadata, but never bypass explicit Deny rules. System guidelines instruct the agent to execute only idempotent read-only status checks. Commands inherit the host's existing permission boundaries.
-- **Call Leases**: Scoped, one-use call leases allow seamless compatibility with external repeat guards and loop protection extensions.
+- **Call Leases**: Scoped leases support independent consumers so cooperating guards can verify the same monitor call without consuming each other's authority. Compatibility requires guard integration; unrelated guard plugins are not automatically exempted. See [integration contracts](integrations/README.md).
 - **Retention & Redaction**: Runtime records and cached descriptors are capped at 10 per session. Durable session history is not capped: version-2 lifecycle entries store argument digests and fixed classifications, not raw arguments, conditions or results. Named sensitive fields are redacted in bounded status previews; arbitrary free text is not guaranteed safe. Existing version-1 history is not rewritten; see [SECURITY.md](SECURITY.md).
 
 ### Trusting a tool your host cannot vouch for
@@ -190,6 +214,9 @@ npm ci --include=dev
 
 # Type checking
 npm run check
+
+# Tests (external integration cases require the fixtures described in integrations/README.md)
+npm test
 
 # Verify packaging integrity
 npm pack --dry-run
