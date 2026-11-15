@@ -148,7 +148,8 @@ export function formatWidgetLines(records: MonitorRecord[], now = Date.now()): s
     const health = formatHealthSuffix(r, now);
     const observed = formatObservedValue(r);
     const display = formatDisplayValues(r);
-    const details = [health, observed, display].filter(Boolean).join(" · ");
+    const delivery = r.notificationDelivery ? `notification ${r.notificationDelivery}` : undefined;
+    const details = [health, observed, display, delivery].filter(Boolean).join(" · ");
     const suffix = details ? ` · ${details}` : "";
     return `${color}${status}${ANSI.reset} ${label} · ${r.attempts} checks · ${elapsed}${suffix}`;
   });

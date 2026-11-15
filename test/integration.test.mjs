@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import piMonitor, { MONITOR_GUIDELINE } from "../src/index.ts";
+import { notificationHost } from "./notification-host.mjs";
 
 function createMockEnvironment() {
   const registeredTools = new Map();
@@ -59,7 +60,8 @@ function createMockEnvironment() {
     appendEntry() {},
   };
 
-  const createToolContext = (sessionId = "test-session") => ({
+  const bind = notificationHost(api);
+  const createToolContext = (sessionId = "test-session") => bind({
     hasUI: true,
     sessionManager: {
       getSessionId: () => sessionId,
@@ -210,11 +212,11 @@ test("monitor_start starts background monitor, updates Pi-Web UI widgets, and se
   // 4. Verify turn-waking notification was delivered
   assert.equal(env.sentMessages.length, 1);
   const notif = env.sentMessages[0];
-  assert.equal(notif.opts.triggerTurn, true);
-  assert.equal(notif.opts.deliverAs, "followUp");
+  assert.equal(notif.opts.triggerTurn, false);
+  assert.equal(env.api.wakeMessages[0].options.triggerTurn, true);
   assert.equal(notif.msg.customType, "pi-monitor:notification");
   assert.ok(notif.msg.content.includes("Status: completed"));
-  assert.ok(notif.msg.content.includes("Wait for task readiness"));
+  assert.ok(notif.msg.content.includes(monitorId));
   assert.equal(notif.msg.details.lastResult, undefined);
   assert.equal(notif.msg.details.status, "completed");
 

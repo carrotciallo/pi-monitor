@@ -117,6 +117,7 @@ export default function piMonitor(pi: ExtensionAPI) {
     const branch = typeof branchFn === "function" ? branchFn.call(ctx.sessionManager) : [];
     const { lost } = scheduler.reconcilePersisted(sessionId, branch);
     scheduler.registerUIContext(sessionId, ctx);
+    scheduler.notifications?.reconcile(ctx);
 
     const lostNotice = scheduler.notifyLost(sessionId, lost);
     const interruptNotice = scheduler.notifyInterruptions(sessionId);
@@ -125,6 +126,25 @@ export default function piMonitor(pi: ExtensionAPI) {
       deliverHeadlessNotice([lostNotice, interruptNotice].filter(Boolean).join("\n") || undefined);
     }
   }
+
+  pi.registerCommand("monitor-delivery", {
+    description: "Show durable notification delivery and wake-request states",
+    handler: async (_args, ctx) => {
+      scheduler.notifications?.bind(ctx);
+      scheduler.notifications?.pump();
+      const rows = scheduler.notifications?.list(ctx.sessionManager.getSessionId()) ?? [];
+      ctx.ui.notify(rows.length ? JSON.stringify(rows, null, 2) : "No notification receipts in this branch", "info");
+    },
+  });
+  // message_end is a hint to reconcile, never an acknowledgement by itself.
+  pi.on("message_end", (_event, ctx) => {
+    scheduler.notifications?.bind(ctx);
+    scheduler.notifications?.pump();
+  });
+  pi.on("agent_settled", (_event, ctx) => {
+    scheduler.notifications?.bind(ctx);
+    // The outbox timer waits until the host is genuinely idle, outside this hook.
+  });
 
   // Lifecycle listeners
   pi.on("session_start", (_event, ctx: ExtensionContext) => {

@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { formatCompletionNotification, formatInterruptionNotice, formatWidgetLines } from "./formatter.ts";
+import { NotificationOutbox } from "./notifications.ts";
+import { formatInterruptionNotice, formatWidgetLines } from "./formatter.ts";
 import { observeDisplayValues } from "./display.ts";
 import { formatLostMonitorNotice } from "./lifecycle.ts";
 import { canonicalJson, computeSha256, matchesCondition, observeConditionValue, validateMonitorSample } from "./matcher.ts";
@@ -26,7 +27,6 @@ import {
   type MonitorPersistEntry,
   type MonitorRecord,
   type MonitorStatus,
-  NOTIFICATION_CUSTOM_TYPE,
   WIDGET_KEY,
 } from "./types.ts";
 
@@ -75,11 +75,25 @@ export class MonitorScheduler {
 
   constructor(toolExecutor: ToolExecutor, pi?: ExtensionAPI) {
     this.toolExecutor = toolExecutor;
-    this.pi = pi;
+    if (pi) this.setExtensionAPI(pi);
   }
+
+  public notifications?: NotificationOutbox;
 
   public setExtensionAPI(pi: ExtensionAPI): void {
     this.pi = pi;
+    this.notifications = new NotificationOutbox(pi, receipt => {
+      const record = this.records.get(receipt.monitorId);
+      if (!record) return;
+      record.notificationDelivery = receipt.delivery;
+      record.notificationWake = receipt.wake;
+      record.notified = receipt.delivery === "persisted";
+      record.notificationError = receipt.delivery === "delivery_unknown"
+        ? "Notification delivery is unconfirmed; automatic retry suppressed to avoid duplicate wake-ups"
+        : receipt.wake === "unconfirmed" ? "Notification persisted; wake is unconfirmed" : undefined;
+      this.updateUI(record.sessionId);
+      this.checkScheduleWidgetCleanup(record.sessionId);
+    });
   }
 
   public registerContext(sessionId: string, ctx: ExtensionContext): void {
@@ -89,6 +103,7 @@ export class MonitorScheduler {
 
   public registerUIContext(sessionId: string, ctx: ExtensionContext): void {
     this.uiContexts.set(sessionId, ctx);
+    this.notifications?.bind(ctx);
   }
 
   public registerToolContext(sessionId: string, ctx: ExtensionContext): void {
@@ -375,6 +390,9 @@ export class MonitorScheduler {
       }
     }
 
+    if (this.notifications && !this.notifications.hasCapacity(sessionId)) {
+      throw new Error("Notification outbox is full; review /monitor-delivery before starting more monitors");
+    }
     // Check concurrency limit for running monitors in this session
     const existingRecords = this.getSessionRecords(sessionId);
     const runningCount = existingRecords.filter(r => r.status === "running").length;
@@ -480,7 +498,8 @@ export class MonitorScheduler {
     record.terminalReason = reason;
     record.interruptedBy = kind === "interrupted" ? reason : undefined;
     record.completedAt = Date.now();
-    record.notified = true; // Never wake a turn for a cancellation or interruption
+    record.notified = false;
+    record.notificationDelivery = "suppressed"; // Cancellation is not delivery.
     record.generation++; // Invalidate any in-flight step
 
     // Abort any in-flight execution
@@ -533,6 +552,7 @@ export class MonitorScheduler {
   }
 
   public pruneSession(sessionId: string): void {
+    this.notifications?.close(sessionId);
     this.cancelSession(sessionId, "Monitoring cleaned up on session shutdown");
     const ids = this.sessionMonitors.get(sessionId);
     if (ids) {
@@ -804,7 +824,9 @@ export class MonitorScheduler {
         this.clearWidgetTimers.delete(sessionId);
         const currentCtx = this.uiContexts.get(sessionId);
         const currentRecords = this.getSessionRecords(sessionId);
-        if (!currentRecords.some(r => r.status === "running")) {
+        const unresolved = this.notifications?.list(sessionId).some(r =>
+          r.delivery !== "persisted" || r.wake === "submitted" || r.wake === "unconfirmed");
+        if (!currentRecords.some(r => r.status === "running") && !unresolved) {
           if (currentCtx?.hasUI) this.safeUI(() => currentCtx.ui.setWidget(WIDGET_KEY, undefined));
         }
       }, 20000);
@@ -814,29 +836,10 @@ export class MonitorScheduler {
 
   private notifyCompletion(record: MonitorRecord): void {
     const uiCtx = this.uiContexts.get(record.sessionId);
-    try {
-      if (!this.pi) throw new Error("Notification API unavailable");
-      const summary = formatCompletionNotification(record);
-      this.pi.sendMessage(
-      {
-        customType: NOTIFICATION_CUSTOM_TYPE,
-        content: summary,
-        display: true,
-        details: {
-          monitorId: record.id,
-          tool: record.tool,
-          status: record.status,
-          durationMs: (record.completedAt ?? Date.now()) - record.startedAt,
-          attempts: record.attempts,
-        },
-      },
-      { deliverAs: "followUp", triggerTurn: true }
-      );
-      // This confirms only synchronous host acceptance, not end-to-end delivery.
-      record.notified = true;
-    } catch {
-      record.notificationError = "Notification delivery is unconfirmed; automatic retry suppressed to avoid duplicate wake-ups";
-      console.error("[pi-monitor] " + record.notificationError);
+    if (this.notifications) this.notifications.enqueue(record);
+    else {
+      record.notificationDelivery = "delivery_unknown";
+      record.notificationError = "Notification API unavailable";
     }
 
     if (uiCtx?.hasUI) {

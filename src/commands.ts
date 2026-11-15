@@ -59,7 +59,8 @@ export function registerMonitorCommands(pi: ExtensionAPI, scheduler: MonitorSche
           ctx.ui.notify(`Monitor '${id}' not found`, "warning");
           return;
         }
-        const stateDesc = record.terminalReason ? `(${record.terminalReason})` : "monitoring";
+        const delivery = record.notificationDelivery ? ` · notification=${record.notificationDelivery} · wake=${record.notificationWake ?? "not_requested"}` : "";
+        const stateDesc = (record.terminalReason ? `(${record.terminalReason})` : "monitoring") + delivery;
         ctx.ui.notify(`[${record.status.toUpperCase()}] ${record.id} · ${record.tool}: ${stateDesc}${record.notificationError ? ` — ${record.notificationError}` : ""}`, record.notificationError ? "warning" : "info");
         return;
       }

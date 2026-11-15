@@ -114,8 +114,12 @@ export interface MonitorRecord {
     errorText?: string;
   };
   terminalReason?: string;
-  /** Fixed diagnostic when synchronous host acceptance cannot be confirmed. */
+  /** Delivery means a matching custom_message is confirmed in the active branch. */
+  notificationDelivery?: "pending" | "submitted" | "persisted" | "delivery_unknown" | "suppressed";
+  /** Wake request acceptance is not proof of model execution. */
+  notificationWake?: "not_requested" | "submitted" | "persisted" | "unconfirmed";
   notificationError?: string;
+  /** Compatibility field: true ONLY after branch persistence is confirmed. */
   notified: boolean;
 }
 

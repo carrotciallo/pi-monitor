@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MonitorScheduler } from "../src/scheduler.ts";
+import { MonitorScheduler } from "./notification-host.mjs";
 import { formatWidgetLines, formatHealthSuffix, formatObservedValue } from "../src/formatter.ts";
 import { STATE_ENTRY_TYPE } from "../src/types.ts";
 

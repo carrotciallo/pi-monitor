@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MonitorScheduler } from "../src/scheduler.ts";
+import { MonitorScheduler } from "./notification-host.mjs";
 
 function createMockAPI() {
   const sentMessages = [];
@@ -107,8 +107,8 @@ test("scheduler completes when condition is met and sends turn-waking notificati
   assert.equal(mockAPI.sentMessages.length, 1);
 
   const sent = mockAPI.sentMessages[0];
-  assert.equal(sent.opts.triggerTurn, true);
-  assert.equal(sent.opts.deliverAs, "followUp");
+  assert.equal(sent.opts.triggerTurn, false);
+  assert.equal(mockAPI.api.wakeMessages[0].options.triggerTurn, true);
   assert.equal(sent.msg.customType, "pi-monitor:notification");
   assert.ok(sent.msg.content.includes("Status: completed"));
 

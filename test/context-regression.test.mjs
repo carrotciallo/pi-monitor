@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import piMonitor from "../src/index.ts";
+import { notificationHost } from "./notification-host.mjs";
 import { MonitorScheduler } from "../src/scheduler.ts";
 
 test("ordinary hook contexts cannot overwrite the executable context", () => {
@@ -17,14 +18,16 @@ test("ordinary hook contexts cannot overwrite the executable context", () => {
 
 test("nested tool hooks with plain contexts do not break the second background query", async () => {
   const tools = new Map(), hooks = new Map(), messages = [];
-  piMonitor({
+  const api = {
     getAllTools: () => [{ name: "remote_status", annotations: { readOnlyHint: true } }],
     registerTool: tool => tools.set(tool.name, tool), registerCommand() {},
     on: (name, fn) => hooks.set(name, fn),
     sendMessage: message => messages.push(message),
-  });
+  };
+  const bind = notificationHost(api);
+  piMonitor(api);
   let queries = 0;
-  const plain = { hasUI: false, sessionManager: { getSessionId: () => "context-regression" } };
+  const plain = bind({ hasUI: false, sessionManager: { getSessionId: () => "context-regression" } });
   const executable = { ...plain, async executeTool(name, input) {
     hooks.get("tool_call")({ toolName: name, input }, plain);
     queries++;

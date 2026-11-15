@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { isAllowedShellQuery } from "../src/shell-policy.ts";
 import { isAllowedMonitorTool } from "../src/tools.ts";
 import piMonitor from "../src/index.ts";
+import { notificationHost } from "./notification-host.mjs";
 
 test("bash and hypa_shell accept arbitrary nonempty commands without command filtering", () => {
   // Validation only: these strings are never executed by this test.
@@ -21,9 +22,11 @@ test("bash and hypa_shell accept arbitrary nonempty commands without command fil
 
 test("monitor_start executes shell queries through the existing host tool pipeline", async () => {
   const tools = new Map(), hooks = new Map(), messages = [];
-  piMonitor({ registerTool: tool => tools.set(tool.name, tool), registerCommand() {},
+  const api = { registerTool: tool => tools.set(tool.name, tool), registerCommand() {},
     on: (name, fn) => hooks.set(name, fn), sendMessage: msg => messages.push(msg),
-    getAllTools: () => [{ name: "hypa_shell", annotations: { destructiveHint: true } }] });
+    getAllTools: () => [{ name: "hypa_shell", annotations: { destructiveHint: true } }] };
+  const bind = notificationHost(api);
+  piMonitor(api);
   const command = "ps aux | grep worker";
   const ctx = { hasUI: false, sessionManager: { getSessionId: () => "shell-test" },
     async executeTool(name, args) {
@@ -31,6 +34,7 @@ test("monitor_start executes shell queries through the existing host tool pipeli
       assert.equal(args.command, command);
       return { result: { content: [{ type: "text", text: "DONE" }] }, isError: false };
     } };
+  bind(ctx);
   try {
     const result = await tools.get("monitor_start").execute("start", {
       tool: "hypa_shell", args: { command }, condition: { textContains: "DONE" },

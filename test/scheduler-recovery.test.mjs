@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MonitorScheduler } from "../src/scheduler.ts";
+import { MonitorScheduler } from "./notification-host.mjs";
 import piMonitor from "../src/index.ts";
 import { MAX_STORED_RECORDS_PER_SESSION, STATE_ENTRY_TYPE } from "../src/types.ts";
 

@@ -14,7 +14,7 @@ import {
   sanitizeValue,
   cleanControlCharacters,
 } from "../src/tools.ts";
-import { MonitorScheduler } from "../src/scheduler.ts";
+import { MonitorScheduler } from "./notification-host.mjs";
 import piMonitor from "../src/index.ts";
 
 test("Audit Item 1: isAllowedMonitorTool strictly enforces Default-Deny and blocks gateway/mutating tools", () => {
@@ -162,7 +162,8 @@ test("Audit Item 2: Scheduler hard deadline aborts and strictly discards late re
     "slow_tool",
     {},
     { field: "status", equals: "done" },
-    { intervalSeconds: 2, timeoutSeconds: 4 }
+    { intervalSeconds: 2, timeoutSeconds: 4 },
+    { hasUI: false, sessionManager: { getSessionId: () => "sess-dl" } }
   );
 
   assert.equal(record.status, "running");
@@ -281,7 +282,7 @@ test("Audit Item 3: executeTool propagates parentToolCallId for guard coexistenc
     }
   };
 
-  const scheduler = new MonitorScheduler(async (tool, args, opts, ctx) => {
+  const scheduler = new MonitorScheduler(async (tool, args, opts) => {
     return mockToolCtx.executeTool(tool, args, opts);
   });
 
